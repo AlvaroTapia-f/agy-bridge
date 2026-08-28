@@ -1,0 +1,19 @@
+[Unit]
+Description=agy-bridge: OpenAI-compatible local bridge to the official Antigravity CLI
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/agy-bridge/env
+ExecStart=${DENO_BIN} run \
+  --allow-net=127.0.0.1 \
+  --allow-run=${AGY_BIN} \
+  --allow-write=%h/.local/state/agy-bridge \
+  --allow-read=%h/.gemini/antigravity-cli/brain \
+  --allow-env \
+  --unstable-no-legacy-abort \
+  ${INSTALL_DIR}/agy-bridge.ts
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

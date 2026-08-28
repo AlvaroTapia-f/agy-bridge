@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+.env.*
+*.env
+!.env.example
+
+# Local state & logs
+*.log
+*.jsonl
+.local/
+state/
+
+# Deno & testing
+.deno/
+cov_profile/
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
