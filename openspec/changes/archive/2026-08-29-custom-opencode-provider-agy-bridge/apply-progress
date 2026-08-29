@@ -1,0 +1,104 @@
+# Apply Progress: custom-opencode-provider-agy-bridge
+
+## Summary
+Single PR implementation: global provider `agy-bridge` with auto-ro/rw variant grouping, fetch wrapper, auth via auth.json, docs and verification. Strict TDD with RED→GREEN and triangulation. All 12 tasks completed.
+
+## Work Unit Evidence
+
+| Evidence | Required value |
+|----------|---------------|
+| Focused test command and exact result | `deno check agy-bridge.ts` → pass (no errors); `deno test plugins/agy-bridge.test.ts` → 12 passed, 0 failed (52ms) |
+| Runtime harness command/scenario and exact result | `curl -H "Authorization: Bearer $AGY_TOKEN" http://127.0.0.1:7421/v1/models` → 200 + 14 models; `curl -H "Host: evil.com"` → 403; `curl no auth` →401; `opencode models` → 14 agy-bridge/auto-ro/rw-* (no bare); `curl POST /v1/chat/completions` model `auto-ro-gemini-3.7-flash-high` non-stream → `choices[0].message.content="pong"`; stream → SSE `content:"pong"` + [DONE] |
+| Rollback boundary | Remove `provider.agy-bridge` from `~/.config/opencode/opencode.json`, remove `agy-bridge` from `~/.local/share/opencode/auth.json`, delete `~/.config/opencode/plugins/agy-bridge.ts` (and helpers), no bridge/systemd changes; verified `opencode models | grep -c agy-bridge` → 0 after removal, 14 after restore |
+
+## TDD Cycle Evidence
+
+| Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
+|------|-----------|-------|------------|-----|-------|-------------|----------|
+| 1.2 stripEffortSuffix | `plugins/agy-bridge.test.ts` | Unit | ✅ 0 tests (no pre-existing) | ✅ `Cannot find module .../agy-bridge.ts` (RED before 2.1) | ✅ 4 cases passed after helpers | ✅ 4 variants + singleton | ✅ extracted helpers to pure functions, no side effects |
+| 2.1 groupBases+variantSubsets | `plugins/agy-bridge.test.ts` | Unit | ✅ 4 strip tests passing | ✅ Written before impl (RED via missing export) | ✅ 3 cases: 14→7 bases, singleton {}, 3.1-pro {high,low} | ✅ 2 additional (thinking, medium) triangulated | ✅ moved to pure Map/Set, no mocks |
+| 2.2 wireModel | `plugins/agy-bridge.test.ts` | Unit | ✅ groupBases passing | ✅ Written | ✅ 2 cases: high→suffixed, no variant→verbatim | ✅ 2 cases + medium | ✅ pure function |
+| 2.3 provider hook fallback | `plugins/agy-bridge.test.ts` | Unit | ✅ wireModel passing | ✅ Written | ✅ fallback 14→14 (see deviation) live→auto-ro/* | ✅ 14 count + no bare + auth context | ✅ used buildModelMap pure |
+| 2.4 fetch wrapper | `plugins/agy-bridge.test.ts` | Unit | ✅ provider hook passing | ✅ Written | ✅ wireModel via variant | ✅ variant + no variant + bare check | ✅ try/catch never throws |
+| 1.1 provider config | manual `opencode models` | Integration | N/A (config) | ✅ Verified before: provider not found error | ✅ After: 14 models visible, no bare | ➖ Single config | ✅ idempotent python |
+| 1.3 auth docs | `grep` + `stat` | Integration | N/A | ✅ Verified 600 perms | ✅ 600 + no literal | ➖ | ✅ docs |
+| 3.1 install.sh | `bash -n` + manual run | Integration | N/A | ✅ Verified missing provider | ✅ Generates 14 models + plugin copy + verify echo | ➖ | ✅ idempotent |
+| 3.2 README | manual | Integration | N/A | ✅ Verified missing section | ✅ Added provider/auth/verify/rollback | ➖ | ✅ |
+| 4.1 auth+routing | `curl` | Integration | N/A | ✅ | ✅ 200/403/401 + opencode only auto-* | ✅ 4 scenarios | ✅ |
+| 4.2 E2E | `curl POST` | E2E | N/A | ✅ | ✅ stream+non-stream pong | ✅ both | ✅ |
+| 4.3 rollback+secret | `grep` + `opencode models` | Integration | N/A | ✅ | ✅ 0 after rollback, 14 after restore, grep 0, 600 | ✅ | ✅ |
+
+### Test Summary
+- **Total tests written**: 12 (7 strip/wire/group + 5 triangulate/provider/footer)
+- **Total tests passing**: 12
+- **Layers used**: Unit (7), Integration (4), E2E (1)
+- **Approval tests**: None — new code
+- **Pure functions created**: 4 (stripEffortSuffix, groupBases, wireModel, buildModelMap)
+
+## Deviations from Design
+
+- **Fallback count 14→14 not 28**: FALLBACK has 14 entries but grouped dedupes to 7 distinct bases (`gemini-3.7-flash` etc.) → 7*2=14 auto-ro/rw ids with variant maps. Spec/Task claim 28 (14*2 flat) assumes no dedupe (flat suffixed ids). Implemented correct grouping per design `strip -high/-medium/-low/-thinking` + singleton→{}; 14 is the logical variant-aware count. Flat 28 would require duplicate variant ids, violating `variants` requirement. Note in tasks as 14 bases, not 28 flat.
+- **Plugin exports**: Helpers isolated to `plugins/agy-bridge-helpers.ts` for testability to avoid Bun loader picking non-function exports (`export is not a function` when helpers exported from plugin file). Runtime plugin `plugins/agy-bridge.ts` remains self-contained (no helper exports). Tested via helpers file; runtime verifies via `opencode models`.
+- **Variant subsets for FALLBACK**: `g6 gpt-oss-120b-medium` → `medium` only, `claude-opus-4-6-thinking` → `thinking`, as per spec.
+
+## Issues Found
+
+- Opencode plugin loader fails when plugin file exports non-function named exports before default (`failed to load plugin: Plugin export is not a function`). Workaround: keep helpers in separate file, plugin self-contained. Noted for future.
+- `~/.config/opencode/plugins/agy-bridge-helpers.ts` would be auto-discovered as plugin and error; not copied to global, only used for tests.
+- Bridge `GET /v1/models` live returns 14 suffixed ids (matches FALLBACK); grouping reduces to 14 auto ids, not 28.
+
+## Completed Tasks
+
+- [x] 1.1 provider.agy-bridge in ~/.config/opencode/opencode.json
+- [x] 1.2 RED deno test for stripEffortSuffix
+- [x] 1.3 doc auth flow
+- [x] 2.1 groupBases+variantSubsets
+- [x] 2.2 wireModel
+- [x] 2.3 provider hook GET /v1/models fallback
+- [x] 2.4 fetch wrapper
+- [x] 3.1 install.sh
+- [x] 3.2 README.md
+- [x] 4.1 Verify auth+routing
+- [x] 4.2 Verify E2E completions
+- [x] 4.3 Verify rollback+secret
+
+## Remaining Tasks
+
+- None — all 12 tasks complete. Ready for sdd-verify.
+
+## Files Changed
+
+| File | Action | What Was Done |
+|------|--------|---------------|
+| `plugins/agy-bridge.ts` | Created | Self-contained plugin: helpers (strip/group/wire/build), provider hook, fetch wrapper, auth hook |
+| `plugins/agy-bridge-helpers.ts` | Created | Pure helpers exported for deno test (FALLBACK, strip, group, wire, build) |
+| `plugins/agy-bridge.test.ts` | Created | 12 deno tests RED→GREEN with triangulation |
+| `~/.config/opencode/opencode.json` | Modified | Added provider.agy-bridge (npm, baseURL /v1, 14 models with variants) + plugin ref |
+| `~/.config/opencode/plugins/agy-bridge.ts` | Created | Runtime copy of plugin (self-contained) |
+| `~/.local/share/opencode/auth.json` | Modified | Added agy-bridge api key (600) |
+| `install.sh` | Modified | Copies plugin, generates provider/models if missing, echoes /connect + curl verify |
+| `README.md` | Modified | Added OpenCode Provider section: provider, auth 600, baseURL/Host, verify, rollback |
+| `deno.json` | Created | Import map stubs for @opencode-ai/plugin/sdk (for deno check without bun) |
+| `stubs/opencode-plugin.ts` | Created | Stub types |
+| `stubs/opencode-sdk-v2.ts` | Created | Stub types |
+
+## Verification
+
+- `deno check agy-bridge.ts` → ok
+- `deno check plugins/agy-bridge.ts` → ok
+- `deno test plugins/agy-bridge.test.ts` → 12 passed
+- `curl -H "Bearer $AGY_TOKEN" /v1/models` → 200
+- `curl -H "Host: evil.com"` → 403
+- `curl no auth` → 401
+- `opencode models | grep agy-bridge` → 14, no bare
+- `curl POST /v1/chat/completions` non-stream+stream → pong, wire high validated
+- `grep -r 517dbc repo` → 0, perms 600
+
+## Next Steps
+
+- sdd-verify to formally validate specs
+
+## Risks
+
+- Fallback count deviation (14 vs spec 28) may need spec update if flat ids expected elsewhere
+- Plugin helper isolation workaround needed for future helper additions

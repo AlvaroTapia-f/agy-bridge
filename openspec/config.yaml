@@ -1,0 +1,48 @@
+schema: spec-driven
+
+context: |
+  Project: agy-bridge — local OpenAI-compatible bridge to the official Antigravity CLI (`agy`) in headless mode.
+  Stack: Deno 2.9.5 (TypeScript, single-file service agy-bridge.ts). No Node/npm, no package.json, no deno.json.
+  Runtime: systemd user service `agy-bridge.service` launches `deno run` with scoped `--allow-*` permissions.
+  Architecture: std-library HTTP server (Deno.serve-style handlers) that spawns the official `agy` binary per request; never talks to Google directly.
+  Conventions: English code/comments; quality via built-in `deno check`/`deno lint`/`deno fmt` (no config files yet).
+  SDD session: execution_mode=interactive, artifact_store=openspec, delivery_strategy=ask-on-risk, review_budget_lines=400.
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Document architecture decisions with rationale
+    - Note Deno permission (`--allow-*`) impact for any new capability
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    guidelines:
+      - Follow existing single-file Deno service patterns
+      - Run `deno check agy-bridge.ts` before marking a task done
+    tdd: true
+    test_command: "deno test"
+  verify:
+    test_command: "deno test"
+    build_command: "deno check agy-bridge.ts"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+
+testing:
+  strict_tdd: true
+  runner: "deno test"
+  detected: "2026-08-28"
+  layers:
+    unit: "deno test (available, no tests written yet)"
+    integration: "none"
+    e2e: "none"
+  coverage: "deno test --coverage (built-in, not wired)"
+  quality:
+    linter: "deno lint"
+    type_checker: "deno check"
+    formatter: "deno fmt"

@@ -7,6 +7,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FORCE=false
+WITH_AUTH=false
 
 usage() {
   cat << USAGE
@@ -14,6 +15,7 @@ Usage: $0 [OPTIONS]
 
 Options:
   --force       Overwrite existing agent configurations in ~/.gemini/config/agents/
+  --with-auth   Auto-configure agy-bridge auth in opencode auth.json from AGY_TOKEN
   -h, --help    Show this help message and exit
 USAGE
   exit 0
@@ -23,6 +25,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --force)
       FORCE=true
+      shift
+      ;;
+    --with-auth)
+      WITH_AUTH=true
       shift
       ;;
     -h|--help)
@@ -160,5 +166,243 @@ else
   echo "Warning: Template $TEMPLATE_FILE not found, skipping service installation." >&2
 fi
 
+# 5. Configure opencode provider (global only)
+OPENCODE_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
+PLUGIN_SRC="$SCRIPT_DIR/plugins/agy-bridge.ts"
+PLUGIN_HELPERS_SRC="$SCRIPT_DIR/plugins/agy-bridge-helpers.ts"
+PLUGIN_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge.ts"
+PLUGIN_HELPERS_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge-helpers.ts"
+if [[ -f "$PLUGIN_SRC" ]]; then
+  mkdir -p "$(dirname "$PLUGIN_DEST")"
+  if [[ ! -f "$PLUGIN_DEST" ]] || ! cmp -s "$PLUGIN_SRC" "$PLUGIN_DEST"; then
+    cp "$PLUGIN_SRC" "$PLUGIN_DEST"
+    echo "  [✓] Installed opencode plugin at $PLUGIN_DEST"
+  else
+    echo "  [i] opencode plugin already up to date at $PLUGIN_DEST"
+  fi
+else
+  echo "  [i] Plugin source not found at $PLUGIN_SRC (skipping plugin install)"
+fi
+
+if [[ -f "$OPENCODE_CONFIG" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 << 'PYEOF'
+import json, pathlib, sys, os
+p = pathlib.Path.home() / ".config/opencode/opencode.json"
+try:
+    data = json.load(open(p))
+except Exception as e:
+    print(f"  [!] Could not parse {p}: {e}", file=sys.stderr)
+    sys.exit(0)
+changed = False
+if "provider" not in data:
+    data["provider"] = {}
+    changed = True
+if "agy-bridge" not in data["provider"]:
+    data["provider"]["agy-bridge"] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "AGY Bridge",
+        "options": {"baseURL": "http://127.0.0.1:7421/v1"}
+    }
+    changed = True
+    print("  [✓] Added provider.agy-bridge to opencode.json")
+else:
+    opts = data["provider"]["agy-bridge"].get("options", {})
+    if opts.get("baseURL") != "http://127.0.0.1:7421/v1":
+        data["provider"]["agy-bridge"]["options"]["baseURL"] = "http://127.0.0.1:7421/v1"
+        changed = True
+        print("  [✓] Updated provider.agy-bridge baseURL to http://127.0.0.1:7421/v1")
+    if data["provider"]["agy-bridge"].get("npm") != "@ai-sdk/openai-compatible":
+        data["provider"]["agy-bridge"]["npm"] = "@ai-sdk/openai-compatible"
+        changed = True
+
+# Generate static models from FALLBACK if missing (grouped 7 bases -> 14 ids with variants)
+try:
+    fallback = [
+      "gemini-3.7-flash-high","gemini-3.7-flash-medium","gemini-3.7-flash-low",
+      "gemini-3.6-flash-high","gemini-3.6-flash-medium","gemini-3.6-flash-low",
+      "gemini-3.5-flash-high","gemini-3.5-flash-medium","gemini-3.5-flash-low",
+      "gemini-3.1-pro-high","gemini-3.1-pro-low",
+      "claude-sonnet-4-6","claude-opus-4-6-thinking","gpt-oss-120b-medium",
+    ]
+    suffixes = ["high","medium","low","thinking"]
+    def strip(s):
+        for suf in suffixes:
+            if s.endswith(f"-{suf}"):
+                return s[:-len(f"-{suf}")], suf
+        return s, None
+    from collections import defaultdict
+    grouped=defaultdict(set)
+    for s in fallback:
+        base, var = strip(s)
+        if var:
+            grouped[base].add(var)
+        else:
+            grouped.setdefault(base, set())
+    models={}
+    for base, vars in grouped.items():
+        for profile in ["ro","rw"]:
+            id_=f"auto-{profile}-{base}"
+            vmap={v:{} for v in sorted(vars)}
+            models[id_]={"name": id_, "variants": vmap}
+    # Only set if missing or incomplete
+    existing = data["provider"]["agy-bridge"].get("models")
+    if not existing or len(existing) < 14:
+        data["provider"]["agy-bridge"]["models"]=models
+        changed = True
+        print(f"  [✓] Generated {len(models)} static models with variants")
+except Exception as e:
+    print(f"  [!] model generation failed: {e}", file=sys.stderr)
+
+plugin_path = f"{os.path.expanduser('~')}/.config/opencode/plugins/agy-bridge.ts"
+if "plugin" not in data or not isinstance(data["plugin"], list):
+    data["plugin"] = []
+    changed = True
+# Keep both file:// and plain variants compatible, prefer plain
+plain = plugin_path
+file_uri = f"file://{plugin_path}"
+# normalize: keep plain, remove file:// duplicates
+if plain not in data["plugin"] and file_uri not in data["plugin"]:
+    data["plugin"].append(plain)
+    changed = True
+    print(f"  [✓] Added plugin ref {plain}")
+else:
+    # ensure plain is present, remove file_uri if needed
+    if file_uri in data["plugin"] and plain not in data["plugin"]:
+        data["plugin"].append(plain)
+        changed = True
+
+if changed:
+    json.dump(data, open(p, 'w'), indent=2)
+    print(f"  [✓] Updated {p}")
+else:
+    print(f"  [i] provider.agy-bridge already configured in {p}")
+PYEOF
+  else
+    echo "  [i] python3 not found — skipping opencode provider setup"
+  fi
+  if [[ "$WITH_AUTH" != true ]]; then
+    echo "  [i] Auth: run 'opencode' → /connect → Other → agy-bridge → paste AGY_TOKEN from $ENV_FILE (type: api, 600)"
+    echo "      Alt (env): set options.apiKey to \"{env:AGY_TOKEN}\" and source env before opencode"
+    echo "      Verify: curl -H \"Authorization: Bearer \$AGY_TOKEN\" http://127.0.0.1:7421/v1/models && opencode models | grep agy-bridge"
+  fi
+else
+  echo "  [i] No opencode config at $OPENCODE_CONFIG — skipping provider setup"
+  if [[ "$WITH_AUTH" != true ]]; then
+    echo "  [i] Auth: run 'opencode' → /connect → Other → agy-bridge → paste AGY_TOKEN from $ENV_FILE (type: api, 600)"
+  fi
+fi
+
+# 6. Configure auth (optional, --with-auth)
+if [[ "$WITH_AUTH" == true ]]; then
+  AUTH_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+  echo "  [+] Configuring auth (--with-auth)..."
+  if [[ ! -f "$ENV_FILE" ]]; then
+    echo "  [!] ENV file not found at $ENV_FILE — cannot configure auth" >&2
+  elif ! command -v python3 >/dev/null 2>&1; then
+    echo "  [!] python3 not found — cannot configure auth.json (manual: copy AGY_TOKEN to $AUTH_FILE)" >&2
+  else
+    ENV_FILE="$ENV_FILE" AUTH_FILE="$AUTH_FILE" python3 << 'PYEOF'
+import json
+import os
+import pathlib
+import sys
+
+env_file = pathlib.Path(os.environ["ENV_FILE"])
+auth_file = pathlib.Path(os.environ["AUTH_FILE"])
+
+# Read AGY_TOKEN from env file (handles AGY_TOKEN=..., export, quotes)
+token = None
+try:
+    for raw in env_file.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k.strip() == "AGY_TOKEN":
+            v = v.strip().strip('"').strip("'").strip()
+            if v:
+                token = v
+            break
+except Exception as e:
+    print(f"  [!] Failed to read {env_file}: {e}", file=sys.stderr)
+    sys.exit(0)
+
+if not token:
+    print(f"  [!] AGY_TOKEN not found in {env_file}", file=sys.stderr)
+    sys.exit(0)
+
+# Load existing auth.json or start empty
+data = {}
+if auth_file.exists():
+    try:
+        text = auth_file.read_text()
+        if text.strip() == "":
+            data = {}
+        else:
+            data = json.loads(text)
+            if not isinstance(data, dict):
+                print(f"  [!] {auth_file} is not a JSON object — resetting", file=sys.stderr)
+                data = {}
+    except Exception as e:
+        print(f"  [!] Could not parse {auth_file}: {e} — backing up and recreating", file=sys.stderr)
+        try:
+            backup = auth_file.with_suffix(".bak")
+            # avoid overwriting existing backup
+            if not backup.exists():
+                auth_file.rename(backup)
+                print(f"  [i] Backed up corrupted file to {backup}", file=sys.stderr)
+        except Exception:
+            pass
+        data = {}
+else:
+    try:
+        auth_file.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"  [!] Cannot create {auth_file.parent}: {e}", file=sys.stderr)
+        sys.exit(0)
+
+# Idempotency: if already correct, ensure perms and exit
+existing = data.get("agy-bridge")
+if isinstance(existing, dict) and existing.get("type") == "api" and existing.get("key") == token:
+    try:
+        auth_file.chmod(0o600)
+    except Exception:
+        pass
+    print(f"  [i] auth.json already configured for agy-bridge (unchanged, preserved {len(data)-1} other entries)")
+    sys.exit(0)
+
+# Upsert agy-bridge entry, preserve other keys
+other_count = len([k for k in data.keys() if k != "agy-bridge"])
+data["agy-bridge"] = {"type": "api", "key": token}
+
+# Atomic write with 600 perms
+try:
+    tmp = auth_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.chmod(0o600)
+    tmp.replace(auth_file)
+    try:
+        auth_file.chmod(0o600)
+    except Exception:
+        pass
+    print(f"  [✓] Configured agy-bridge auth in {auth_file} (preserved {other_count} other entries, 600)")
+except Exception as e:
+    print(f"  [!] Failed to write {auth_file}: {e}", file=sys.stderr)
+    sys.exit(0)
+PYEOF
+    # If python succeeded, show verify hint
+    if [[ -f "$AUTH_FILE" ]]; then
+      echo "  [i] Auth auto-configured — verify: opencode models | grep agy-bridge"
+    fi
+  fi
+fi
+
 echo "==> Installation complete!"
 echo "    Check health: curl http://127.0.0.1:7421/healthz"
+echo "    Verify provider: curl -H \"Authorization: Bearer \$(grep AGY_TOKEN $ENV_FILE | cut -d= -f2)\" http://127.0.0.1:7421/v1/models | head"
+echo "    Then: opencode models (should list agy-bridge/auto-ro-* and agy-bridge/auto-rw-*)"

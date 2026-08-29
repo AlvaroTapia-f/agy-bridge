@@ -1,0 +1,6 @@
+{
+  "imports": {
+    "@opencode-ai/plugin": "./stubs/opencode-plugin.ts",
+    "@opencode-ai/sdk/v2": "./stubs/opencode-sdk-v2.ts"
+  }
+}
