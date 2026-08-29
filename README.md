@@ -24,18 +24,11 @@ long"). Verificado con payloads de ~190 KB.
    OAuth propio, no habla con endpoints de Google ni suplanta fingerprints.
 2. **Una cuenta, una llamada a la vez** (`MAX_CONCURRENT=1`): los requests se
    encolan y serializan.
-3. **Agente `raw` con whitelist de una sola tool de solo lectura**
-   (`~/.gemini/config/agents/raw/agent.md`, `tools: [view_file]`): aunque el
-   modelo intente actuar, el peor caso es leer un archivo. El prompt del agente
-   además le prohíbe usar tools (verificado: resiste "ignore previous
-   instructions"). Esto es necesario porque `settings.json` de agy tiene
-   `toolPermission: always-proceed`.
-   - Hallazgo de Fase 0: `tools: []` cae a "todas las tools" y
-     `tools: [wait_5_seconds]` rompe la inicialización del agente;
-     `init.tools` del stream muestra el catálogo completo (cosmético) — la
-     restricción real es la whitelist.
-4. **Mantén `agy` actualizado** (versiones viejas de cliente son rechazadas
-   server-side).
+3. **Tres agentes según costo/riesgo:**
+   - **`raw` — costoso, escape hatch** (~40k tokens por `tool_call`: cada tool de opencode = sesión agy nueva). Solo lectura (`view_file`); su prompt prohíbe usar tools (resiste "ignore previous instructions"). Se mantiene por compatibilidad; no recomendado para tareas largas. `tools: []` cae a "todas" y `wait_5_seconds` rompe la init.
+   - **`worker-ro` — autónomo solo lectura** (1 sesión por tarea, sin reenvíos por tool).
+   - **`worker-rw` — autónomo lectura/escritura** (puede crear/modificar archivos; nunca `commit`/`push` sin pedido explícito). OJO: `sed_file`, `command_status`, `send_command_input` y `wait_5_seconds` rompen la init si se whitelistan.
+4. **Mantén `agy` actualizado** (versiones viejas son rechazadas server-side).
 5. Nunca compartas este servicio fuera de localhost (bind 127.0.0.1) ni añadas
    rotación de cuentas.
 
@@ -43,23 +36,26 @@ long"). Verificado con payloads de ~190 KB.
 
 ### Opción A: Instalación Automática (Recomendada con systemd)
 
-El script [`install.sh`](install.sh) detecta automáticamente las rutas de `deno` y `agy`, inicializa la configuración en `~/.config/agy-bridge/env` (basada en [`.env.example`](.env.example)), copia los perfiles de agentes requeridos (`agents/`) y registra/inicia el servicio systemd de usuario:
+`install.sh` hace 3 cosas automáticamente:
+
+- **Entorno:** detecta rutas de `deno`/`agy`, inicializa `~/.config/agy-bridge/env` (desde [`.env.example`](.env.example)).
+- **Agentes:** copia perfiles `raw`, `worker-ro`, `worker-rw` a `~/.gemini/config/agents/`.
+- **Provider + plugin + modelos:** registra provider `agy-bridge` (`baseURL: "http://127.0.0.1:7421/v1"`), instala `~/.config/opencode/plugins/agy-bridge.ts` (+ `agy-bridge-helpers.ts`) y genera modelos `auto-ro/rw-*` con `variants` dinámicos (consulta `GET /v1/models`; fallback agrupado si el bridge no responde).
 
 ```sh
-./install.sh                 # solo provider + plugin + modelos
+./install.sh                 # provider + plugin + modelos (auth manual vía /connect)
 ./install.sh --with-auth     # + auth.json automático (recomendado para máquina limpia)
 ```
 
 Flags disponibles:
-- `--force`: Sobrescribe configuraciones de agentes existentes en `~/.gemini/config/agents/`.
-- `--with-auth`: Configura `~/.local/share/opencode/auth.json` con `AGY_TOKEN` de `~/.config/agy-bridge/env` como `{"agy-bridge":{"type":"api","key":"..."}}`, preservando otras keys (`opencode-go` etc.), `chmod 600`, idempotente. Sin el flag, la auth se hace manual vía `/connect` (ver abajo).
+- `--force`: sobrescribe configuraciones existentes en `~/.gemini/config/agents/`.
+- `--with-auth`: configura `~/.local/share/opencode/auth.json` con `AGY_TOKEN` de `~/.config/agy-bridge/env` como `{"agy-bridge":{"type":"api","key":"..."}}`, preservando otras keys, `chmod 600`, idempotente. Sin el flag, la auth es manual vía `/connect` (ver abajo).
 
 ### Opción B: Instalación Manual
 
-Si no utilizas systemd o prefieres configurar todo a mano:
+Si no utilizas systemd o prefieres configurar todo a mano, replica lo que hace `install.sh`:
 
 1. **Configuración de entorno:**
-   Copia `.env.example` a `~/.config/agy-bridge/env`:
    ```sh
    mkdir -p ~/.config/agy-bridge
    cp .env.example ~/.config/agy-bridge/env
@@ -68,15 +64,28 @@ Si no utilizas systemd o prefieres configurar todo a mano:
    ```
 
 2. **Copiar agentes:**
-   Los perfiles de agentes (`raw`, `worker-ro`, `worker-rw`) deben estar en `~/.gemini/config/agents/`:
    ```sh
    mkdir -p ~/.gemini/config/agents
    cp -r agents/* ~/.gemini/config/agents/
+   # con --force: sobrescribe existentes
    ```
 
-3. **Ejecución del servicio:**
+3. **Instalar plugin de opencode:**
+   ```sh
+   mkdir -p ~/.config/opencode/plugins
+   cp plugins/agy-bridge.ts ~/.config/opencode/plugins/agy-bridge.ts
+   cp plugins/agy-bridge-helpers.ts ~/.config/opencode/plugins/agy-bridge-helpers.ts
+   ```
+
+4. **Registrar provider y modelos en `~/.config/opencode/opencode.json` (global):**
+   Replica lo que hace `install.sh` (ver `plugins/agy-bridge.ts`): añade `provider.agy-bridge` (`npm: "@ai-sdk/openai-compatible"`, `options.baseURL: "http://127.0.0.1:7421/v1"`) y `plugin` con la ruta del plugin. Los modelos `auto-ro/rw-*` se generan agrupando el catálogo de `GET /v1/models` por sufijo de esfuerzo; no exponer ids bare `gemini-*`/`claude-*`.
+
+5. **Configurar auth (elige una):**
+   - **Automática (como `--with-auth`):** lee `AGY_TOKEN` de `~/.config/agy-bridge/env` y hace upsert en `~/.local/share/opencode/auth.json` preservando otras keys, `chmod 600`.
+   - **Manual:** `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `AGY_TOKEN`. Alternativa env: `"apiKey": "{env:AGY_TOKEN}"` con `source ~/.config/agy-bridge/env` antes de lanzar `opencode`.
+
+6. **Ejecución del servicio:**
    - **Con systemd de usuario:**
-     Renderiza `agy-bridge.service.template` en `~/.config/systemd/user/agy-bridge.service`:
      ```sh
      mkdir -p ~/.config/systemd/user
      sed -e "s|\${DENO_BIN}|$(which deno)|g" \
@@ -87,7 +96,6 @@ Si no utilizas systemd o prefieres configurar todo a mano:
      systemctl --user enable --now agy-bridge
      ```
    - **Directo en terminal (sin systemd):**
-     Exporta las variables de entorno necesarias y ejecuta Deno directamente:
      ```sh
      set -a; source ~/.config/agy-bridge/env; set +a
      $DENO_BIN run --allow-net --allow-run=$AGY_BIN \
@@ -96,7 +104,7 @@ Si no utilizas systemd o prefieres configurar todo a mano:
 
 ## OpenCode Provider (global)
 
-El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.json` (solo global, nunca repo-local). `install.sh` lo configura automáticamente (provider + plugin `~/.config/opencode/plugins/agy-bridge.ts` + 14 modelos `auto-ro/rw-*` con `variants`). Con `--with-auth` también configura `auth.json` sin pasos manuales; para instalación manual:
+El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.json` (solo global, nunca repo-local). `install.sh` lo configura automáticamente; para referencia manual:
 
 ```json
 {
@@ -113,45 +121,44 @@ El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.j
 
 - `baseURL` **debe** terminar en `/v1` — el SDK añade `/chat/completions` (sin `/v1` obtienes `404`).
 - `Host` guard en el bridge: solo `127.0.0.1:*` o `localhost:*` → `Host: evil.com` devuelve `403`.
-- Plugin `~/.config/opencode/plugins/agy-bridge.ts` agrupa modelos por sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>` con `variants: {high,medium,low}` (ej. `auto-ro-gemini-3.7-flash` → picker `high/medium/low`; singletons `claude-sonnet-4-6` → `variants:{}`). Seleccionar variante (vía hook `chat.message`) reescribe `model` al wire `auto-ro-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin variante elegida, defaultea a `medium`/`high` si el modelo tiene variants; singletons sin variants se envían verbatim. **Nunca** se exponen ids bare `gemini-*`/`claude-*`.
+- Plugin (`agy-bridge.ts` + `agy-bridge-helpers.ts`) agrupa el catálogo por sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>` con `variants` (ej. `auto-ro-gemini-3.7-flash` → `high/medium/low`). La selección de variante (hook `chat.message` + wrapper `fetch` sobre `7421/v1/chat/completions`) reescribe `model` al wire `auto-ro/rw-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin variante elegida, el wrapper aplica default `medium` → `high` → `low` → `thinking`; singletons sin variants se envían verbatim. Fallback agrupado actual: 7 bases × 2 perfiles = 14 ids con variants. **Nunca** exponer ids bare `gemini-*`/`claude-*`.
 
 ### Auth (sin secretos en repo)
 
 **Automático (recomendado en máquina nueva):** `./install.sh --with-auth` lee `AGY_TOKEN` de `~/.config/agy-bridge/env` y hace upsert en `~/.local/share/opencode/auth.json` preservando otras entradas, `chmod 600`, idempotente. No pisa `opencode-go` ni otras keys.
 
-**Manual (alternativa):** `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `AGY_TOKEN` de `~/.config/agy-bridge/env`. Esto escribe `~/.local/share/opencode/auth.json`:
+**Manual (alternativa):** `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `AGY_TOKEN`:
 
 ```json
 { "agy-bridge": { "type": "api", "key": "<AGY_TOKEN>" } }
 ```
 
-`auth.json` y `env` deben ser `chmod 600` (el instalador ya lo hace). Alternativa documentada: `"apiKey": "{env:AGY_TOKEN}"` con `source ~/.config/agy-bridge/env` antes de lanzar `opencode`. Nunca comitear el token literal — verifica con `grep -r AGY_TOKEN .` → 0 matches (solo referencias a `"{env:AGY_TOKEN}"`).
+`auth.json` y `env` deben ser `chmod 600`. Alternativa: `"apiKey": "{env:AGY_TOKEN}"` con `source ~/.config/agy-bridge/env` antes de lanzar `opencode`. Nunca comitear el token — verifica con `grep -r AGY_TOKEN .` → 0 matches (solo `"{env:AGY_TOKEN}"`).
 
 ### Verificación
+
+Checklist post-instalación (endpoints: `GET /v1/models`, `POST /v1/chat/completions`, `GET /healthz`):
 
 ```sh
 # 1. Bridge vivo y auth OK
 source ~/.config/agy-bridge/env
 curl -s -H "Authorization: Bearer $AGY_TOKEN" http://127.0.0.1:7421/v1/models | head
+curl -s http://127.0.0.1:7421/healthz
 
-# 2. Host guard
+# 2. Host guard → 403
 curl -s -H "Host: evil.com" -H "Authorization: Bearer $AGY_TOKEN" http://127.0.0.1:7421/v1/models -w " %{http_code}\n"
 
 # 3. Sin auth → 401
 curl -s http://127.0.0.1:7421/v1/models -w " %{http_code}\n"
 
 # 4. Provider visible y sin bare ids
-opencode models | grep agy-bridge  # debe mostrar solo agy-bridge/auto-ro-* y auto-rw-*
+opencode models | grep agy-bridge  # solo auto-ro-* y auto-rw-*
 
-# 5. Variante → wire id (picker high en TUI envía auto-ro-gemini-3.7-flash-high)
+# 5. Variante → wire id (picker high envía auto-ro-gemini-3.7-flash-high)
 curl -s http://127.0.0.1:7421/v1/chat/completions -H "content-type: application/json" \
   -H "Authorization: Bearer $AGY_TOKEN" \
   -d '{"model":"auto-ro-gemini-3.7-flash-high","messages":[{"role":"user","content":"ping"}]}' | jq .choices[0].message.content
-
-# Stream
-curl -N http://127.0.0.1:7421/v1/chat/completions -H "content-type: application/json" \
-  -H "Authorization: Bearer $AGY_TOKEN" \
-  -d '{"model":"auto-ro-gemini-3.7-flash-high","messages":[{"role":"user","content":"ping"}],"stream":true}'
+# Stream: añadir "stream":true y usar curl -N
 ```
 
 ### Rollback
@@ -165,117 +172,67 @@ curl -N http://127.0.0.1:7421/v1/chat/completions -H "content-type: application/
 
 No hay cambios en `agy-bridge.ts` ni en systemd; `baseURL` loopback y `accessGuard` (Host 403, Bearer 401) permanecen.
 
-## Uso
-
-```sh
-# Verificar estado
-curl -s http://127.0.0.1:7421/healthz
-```
-
-Endpoints: `GET /v1/models`, `POST /v1/chat/completions` (stream y no-stream), `GET /healthz`.
-
 ## Config (env)
 
-Consulta [`.env.example`](.env.example) para ver la lista completa con valores por defecto.
+Consulta [`.env.example`](.env.example) para valores por defecto.
 
 | Var | Default | Nota |
 |---|---|---|
-| `PORT` | `7421` | Puerto del servidor HTTP |
-| `AGY_BIN` | `agy` | Ruta al binario oficial `agy` |
-| `DENO_BIN` | `deno` | Ruta al binario `deno` (usado por `install.sh`/systemd) |
-| `AGY_AGENT` | `raw` | Agente de agy sin tools |
+| `PORT` | `7421` | Puerto HTTP |
+| `AGY_BIN` | `agy` | Ruta binario `agy` |
+| `DENO_BIN` | `deno` | Ruta binario `deno` |
+| `AGY_AGENT` | `raw` | Agente por defecto en modo `raw` (opencode usa `auto-*`) |
 | `MAX_CONCURRENT` | `1` | Serializa llamadas agy |
-| `PRINT_TIMEOUT` | `15m` | `--print-timeout` de agy |
-| `AGY_TOOLS` | `on` | `off` = desactiva el protocolo de tools (texto puro) |
-| `AGY_TOOL_SCHEMA` | `full` | `slim` quita descripciones de parámetros: −2.7k tokens/turno (medido), pequeño riesgo de peores tool calls |
-| `AGY_REUSE` | `off` | `on` = continúa conversaciones agy entre turnos (1 sesión por tarea en vez de 1 por turno), PERO cuesta ~6k tokens MÁS por turno (agy reprocesa todo + reininyecta harness; el cache nunca activa — medido). Solo si te molestan las sesiones y prefieres pagar tokens |
-| `AGY_TOKEN` | *requerido* | Token secreto de autenticación (`Authorization: Bearer <AGY_TOKEN>`) |
+| `PRINT_TIMEOUT` | `20m` | `20m` en `.env.example`/`install.sh`; fallback del bridge `15m` si no definido |
+| `AGY_TOOLS` | `on` | `off` = desactiva protocolo de tools en `raw` |
+| `AGY_TOOL_SCHEMA` | `full` | `slim` = menos tokens en `raw` |
+| `AGY_REUSE` | `off` | `on` = continúa conversaciones `raw` (no aplica en `auto-*`) |
+| `AGY_TOKEN` | *requerido* | `Authorization: Bearer <AGY_TOKEN>` |
 
 ## Sesiones y tokens: por qué se comporta como se comporta
 
-- **Una sesión agy por completion** es inherente al modelo OpenAI-compatible
-  (stateless): opencode reenvía system + tools + historial en cada turno. Una
-  tarea de 3 pasos = 3 turnos + 1 llamada pequeña de metadatos/título de
-  opencode ≈ las 4 sesiones que ves.
-- **Composición medida de un turno real de subagente sdd (~40k tokens de
-  input)**: system de opencode ~25k (prompt del agente + AGENTS.md + skills —
-  la parte dominante, se controla desde tu config de opencode), schemas de
-  tools ~12k (→ ~9k con `AGY_TOOL_SCHEMA=slim`), harness de agy ~5.5k
-  (fijo, no configurable), historial (crece con la tarea).
-- **Palancas reales de consumo**: (1) el tamaño de tus prompts/skills de
-  subagente, (2) menos turnos por tarea (prompts que pidan respuestas
-  directas), (3) `slim`, en ese orden. `AGY_REUSE` NO ahorra tokens.
+- **Modo autónomo (`auto-ro/rw`, recomendado): 1 tarea = 1 request = 1 sesión agy.** El modelo resuelve la tarea completa con su loop interno y devuelve un solo completion. Overhead medido: ~7.4k tokens (`ro`) / ~9.8k (`rw`). Reduce ~75/80% de tokens vs modo stateless al evitar reenviar system + schemas + historial por cada tool_call.
+- **Modo `raw` (escape hatch, no expuesto en el provider): stateless por turno.** Cada `tool_call` a opencode = sesión agy nueva. Una tarea de 3 pasos ≈ 4 sesiones (3 turnos + metadatos). Composición de un turno `raw` (~40k input): system opencode ~25k, schemas ~12k (→ ~9k con `AGY_TOOL_SCHEMA=slim`), harness ~5.5k + historial. Solo usar vía `curl` directo si necesitas texto puro.
+- **Palancas reales de consumo:** (1) tamaño de prompts/skills de opencode, (2) usar `auto-ro/rw` para colapsar N turnos en 1 sesión, (3) `AGY_TOOL_SCHEMA=slim` solo afecta a `raw`. `AGY_REUSE=on` NO ahorra en `raw` (cuesta ~6k más por turno; cache no activa) y es irrelevante en `auto-*`.
 
 ## Protocolo de tools
 
-opencode pasa sus tools (bash, edit, read…) en cada request; el bridge las
-renderiza como protocolo de texto (`<tool_call>{json}</tool_call>` /
-`<tool_result>`), parsea la respuesta del modelo y las devuelve como
-`tool_calls` OpenAI. **La ejecución la controla opencode con sus permisos**
-(tus reglas ask de git siguen aplicando), no agy. Si algún modelo flashea con
-el protocolo, `AGY_TOOLS=off` degrada a modo texto.
+En `raw`, el bridge renderiza tools de opencode como protocolo de texto (`<tool_call>`/`<tool_result>`) y las devuelve como `tool_calls` OpenAI; la ejecución la controla opencode. `AGY_TOOLS=off` degrada a texto puro. En `auto-ro/rw` este protocolo no interviene: el agente ejecuta su loop nativo interno.
 
 ## Delegación autónoma (modelos `auto-*`)
 
-Los modelos con prefijo `auto-<perfil>-` cambian el modo de operación: en vez
-de comportarse como endpoint stateless (un turno opencode = una sesión agy),
-ejecutan **un agente agy autónomo** que resuelve la tarea completa con su
-propio loop nativo de tools y devuelve un solo completion.
+Los modelos `auto-<perfil>-` ejecutan un agente agy autónomo que resuelve la tarea completa con su loop nativo y devuelve un solo completion.
 
 ```
 stateless:  opencode ──n turnos──▶ bridge ──n sesiones──▶ agy raw   (contexto viaja n veces)
-auto-ro:    opencode ──1 request──▶ bridge ──1 sesión───▶ agy worker-ro (loop interno; contexto viaja 1 vez)
+auto-ro:    opencode ──1 request──▶ bridge ──1 sesión───▶ agy worker-ro (contexto viaja 1 vez)
 ```
 
-- **Perfil** = agente agy con whitelist propia (`~/.gemini/config/agents/`).
-  - `ro` → `worker-ro` (solo lectura: view_file, list_dir, grep_search,
-    find_by_name, read_url_content, search_web). Harness medido: ~7.4k tokens.
-  - `rw` → `worker-rw` (ro + write_to_file, replace_file_content,
-    multi_replace_file_content, run_command). Harness medido: ~9.8k tokens.
-    Instrucciones internas prohiben commit/push sin pedido explícito; los
-    cambios quedan sin commitear para revisión humana. OJO: `sed_file`,
-    `command_status`, `send_command_input` y `wait_5_seconds` rompen la
-    inicialización del agente si se whitelistan — no agregarlos.
-- **Motor** = cualquier modelo del catálogo como sufijo (`auto-ro-<modelo>` /
-  `auto-rw-<modelo>`). La matriz completa 14×2 está registrada en opencode.json
-  y el bridge la mapea dinámicamente (valida el sufijo contra `modelSlugs`).
-  Los modelos planos stateless fueron REMOVIDOS del provider de opencode
-  (ningún agente puede seleccionarlos); el bridge conserva el path raw como
-  escape hatch para llamadas API directas.
-- Streaming: bufferizado + comentarios SSE `: keepalive` cada 10s (los deltas
-  de pasos intermedios NO garantizan igualar al resultado final cuando hay
-  tools nativas de por medio). `delta_chars` se loguea para futura medición.
-- Una tarea delegada = 1 sesión agy (vs 3-6 sesiones stateless), −75/80%
-  tokens medidos en pilotos internos.
+- **Perfil** = agente con whitelist propia (`~/.gemini/config/agents/`):
+  - `ro` → `worker-ro`: `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_url_content`, `search_web` (~7.4k harness).
+  - `rw` → `worker-rw`: `ro` + `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` (~9.8k harness). No hace `commit`/`push` sin pedido explícito. OJO: `sed_file`, `command_status`, `send_command_input`, `wait_5_seconds` rompen la init.
+- **Motor** = cualquier modelo como sufijo (`auto-ro-<modelo>` / `auto-rw-<modelo>`). El provider genera la matriz dinámicamente desde `GET /v1/models` (o fallback 7 bases × 2) y el bridge valida en `parseAutoModel`. Los ids bare stateless fueron removidos del provider; el bridge conserva el path `raw`/bare como escape hatch para API directa.
+- Streaming bufferizado + SSE `: keepalive` cada 10s (deltas intermedios no garantizan igualar al final con tools nativas). `delta_chars` se loguea para medición.
 
 ## Consumo de cuota (vigilar)
 
-- Log append-only: `~/.local/state/agy-bridge/usage.jsonl`
-  (ts, modelo, duración, tokens, status por request).
-- **Overhead del harness: ~5.5k tokens de input por llamada** (system prompt
-  interno de agy), se suman a tu workload de la ventana de 5h.
-- Cada completion = conversación agy nueva → el contexto se reprocesa por
-  turno (limitación conocida; mitigación futura: reusar `conversation_id`).
+- Log append-only: `~/.local/state/agy-bridge/usage.jsonl` (ts, modelo, duración, tokens, status por request).
+- Overhead por tarea autónoma: ~7.4k (`ro`) / ~9.8k (`rw`); ~5.5k en `raw`.
 
 ## Diagnóstico rápido
 
 ```sh
-systemctl --user status agy-bridge      # servicio
-journalctl --user -u agy-bridge -f      # logs del bridge
+systemctl --user status agy-bridge
+journalctl --user -u agy-bridge -f
 tail ~/.local/state/agy-bridge/usage.jsonl
-# smoke test completo:
-curl -s http://127.0.0.1:7421/v1/chat/completions \
-  -H 'content-type: application/json' \
-  -d '{"model":"gemini-3.7-flash-low","messages":[{"role":"user","content":"ping"}]}'
+# Smoke test: ver Verificación paso 5 (POST auto-ro-*)
 ```
 
-Si agy cambia flags/eventos (stream-json), el bridge rompe: revisar
-`agy --help`, ajustar parser, y correr el smoke test de arriba.
+Si agy cambia flags/eventos (stream-json), el bridge rompe: revisar `agy --help`, ajustar parser y correr smoke test de Verificación.
 
 ## Limitaciones
 
 - Latencia de arranque de proceso agy por turno (~2-7s).
 - Thinking tokens: se contabilizan en usage, no se muestran.
-- Tool-calls en modo stream se bufferizan (no hay streaming de deltas en turnos
-  con tools).
+- Tool-calls en modo stream se bufferizan (no hay streaming de deltas en turnos con tools).
 - `temperature`/`max_tokens` se ignoran (agy no los expone).
