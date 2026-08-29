@@ -32,6 +32,19 @@ long"). Verificado con payloads de ~190 KB.
 5. Nunca compartas este servicio fuera de localhost (bind 127.0.0.1) ni añadas
    rotación de cuentas.
 
+## Requisitos
+
+Antes de instalar, verifica que tu máquina cumple con esto (el `install.sh` chequea los dos primeros y falla si faltan):
+
+- **Google Antigravity con suscripción activa** y **`agy` CLI instalado y autenticado** (`agy --help` y `agy models` deben funcionar — el bridge solo spawnea `agy`, no hace login por vos).
+- **`deno` instalado** (`deno --version` — `install.sh` lo busca en `~/.deno/bin/deno`, `/usr/bin/deno`, etc.).
+- **`opencode` instalado** (v1.18+ — si no está `~/.config/opencode/opencode.json`, el installer saltea el provider y avisa).
+- **Linux con `systemd --user`** (para `agy-bridge.service` — sin systemd podés correr directo con `deno run`, ver Opción B).
+- **`python3`** (para generar `provider.agy-bridge` + modelos `auto-ro/rw-*` con variants en `opencode.json`).
+- **`openssl` o `xxd` + `/dev/urandom`** (para generar `AGY_TOKEN` de 24 bytes).
+- **Puerto `7421` libre en `127.0.0.1`** (bind loopback — configurable vía `PORT` en `~/.config/agy-bridge/env`).
+- **Permisos:** `~/.config/agy-bridge/env` y `~/.local/share/opencode/auth.json` quedan en `chmod 600` automáticamente.
+
 ## Instalación
 
 ### Opción A: Instalación Automática (Recomendada con systemd)
