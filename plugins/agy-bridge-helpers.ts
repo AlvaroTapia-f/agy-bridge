@@ -41,17 +41,20 @@ export function wireModel(base: string, variant?: string): string {
   return variant ? `${base}-${variant}` : base
 }
 
+export type VariantSpec = { reasoningEffort: string }
+
 export function buildModelMap(bases: Map<string, Set<string>>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const [base, variants] of bases) {
     for (const profile of ["ro", "rw"] as const) {
       const id = `auto-${profile}-${base}`
-      const variantMap: Record<string, { disabled?: boolean }> = {}
-      for (const v of variants) variantMap[v] = {}
+      const variantMap: Record<string, VariantSpec> = {}
+      for (const v of variants) variantMap[v] = { reasoningEffort: v }
       out[id] = {
         id,
         name: id,
         provider: { id: "agy-bridge", name: "AGY Bridge" },
+        ...(variants.size ? { capabilities: { reasoning: true as const } } : {}),
         variants: variantMap,
       }
     }

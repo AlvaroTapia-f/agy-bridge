@@ -1,5 +1,5 @@
-// RED test for custom-opencode-provider-agy-bridge
-// Must fail before implementation (2.1) and pass after.
+// RED test for bridge-effort-reasoning-exposure
+// Must fail before implementation (2.1) and pass after — strict TDD.
 import { assertEquals } from "jsr:@std/assert";
 import { stripEffortSuffix, groupBases, wireModel, FALLBACK_MODELS, buildModelMap } from "./agy-bridge-helpers.ts";
 
@@ -51,7 +51,7 @@ Deno.test("wireModel: no variant yields verbatim", () => {
 Deno.test("buildModelMap: FALLBACK grouped -> 14 auto-ro/rw ids with variants", async () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
-  // 7 bases *2 profiles = 14 ids (documents actual grouping; spec mentions 28 flat but variant grouping reduces)
+  // 7 bases *2 profiles = 14 ids
   assertEquals(Object.keys(map).length, 14);
   // picker for gemini-3.7-flash should show high/medium/low
   const m = map["auto-ro-gemini-3.7-flash"] as unknown as { variants: Record<string, unknown> };
@@ -101,4 +101,66 @@ Deno.test("fetch wrapper: variant maps to suffixed wire model (unit via wireMode
   assertEquals(wireModel("auto-ro-gemini-3.7-flash", "medium"), "auto-ro-gemini-3.7-flash-medium");
   // no variant -> verbatim ensures no bare ids
   assertEquals(wireModel("auto-rw-claude-opus-4-6", undefined), "auto-rw-claude-opus-4-6");
+});
+
+// --- Enriched reasoning metadata (strict TDD — RED before GREEN) ---
+
+Deno.test("buildModelMap: enriched shape — variants.*.reasoningEffort == key", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  // every variant value must be { reasoningEffort: key }
+  for (const [id, def] of Object.entries(map)) {
+    const m = def as unknown as { variants: Record<string, unknown>; capabilities?: unknown };
+    for (const k of Object.keys(m.variants)) {
+      const v = m.variants[k] as Record<string, unknown>;
+      assertEquals(v["reasoningEffort"], k, `${id} variant ${k} reasoningEffort`);
+    }
+  }
+  // spot-check gemini-3.7-flash
+  const gemini = map["auto-rw-gemini-3.7-flash"] as unknown as { variants: Record<string, { reasoningEffort: string }> };
+  assertEquals(gemini.variants.high.reasoningEffort, "high");
+  assertEquals(gemini.variants.medium.reasoningEffort, "medium");
+  assertEquals(gemini.variants.low.reasoningEffort, "low");
+});
+
+Deno.test("buildModelMap: capabilities.reasoning true iff variants non-empty", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  const singleton = map["auto-ro-claude-sonnet-4-6"] as unknown as { capabilities?: { reasoning?: boolean }; variants: Record<string, unknown> };
+  // singleton must NOT advertise reasoning
+  assertEquals(singleton.capabilities?.reasoning, undefined);
+  assertEquals(Object.keys(singleton.variants).length, 0);
+  // non-singletons must advertise reasoning:true
+  const gemini = map["auto-ro-gemini-3.7-flash"] as unknown as { capabilities?: { reasoning?: boolean } };
+  assertEquals(gemini.capabilities?.reasoning, true);
+  const opus = map["auto-ro-claude-opus-4-6"] as unknown as { capabilities?: { reasoning?: boolean }; variants: Record<string, unknown> };
+  assertEquals(opus.capabilities?.reasoning, true);
+  assertEquals(Object.keys(opus.variants), ["thinking"]);
+});
+
+Deno.test("buildModelMap: thinking variant enriched", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  const opus = map["auto-rw-claude-opus-4-6"] as unknown as { variants: Record<string, { reasoningEffort: string }> };
+  assertEquals(opus.variants.thinking.reasoningEffort, "thinking");
+});
+
+Deno.test("buildModelMap: regression — gpt-oss singleton-like medium is selectable", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  const gpt = map["auto-rw-gpt-oss-120b"] as unknown as { capabilities?: { reasoning?: boolean }; variants: Record<string, { reasoningEffort: string }> };
+  assertEquals(gpt.capabilities?.reasoning, true);
+  assertEquals(gpt.variants.medium.reasoningEffort, "medium");
+});
+
+Deno.test("buildModelMap: all non-singleton variants reasoningEffort coverage (triangulate)", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  // gpt-oss-120b and gemini-3.1-pro also covered
+  const pro = map["auto-ro-gemini-3.1-pro"] as unknown as { variants: Record<string, { reasoningEffort: string }> };
+  assertEquals(pro.variants.high.reasoningEffort, "high");
+  assertEquals(pro.variants.low.reasoningEffort, "low");
+  // rw variants must mirror ro
+  const proRw = map["auto-rw-gemini-3.1-pro"] as unknown as { variants: Record<string, { reasoningEffort: string }> };
+  assertEquals(proRw.variants.high.reasoningEffort, "high");
 });

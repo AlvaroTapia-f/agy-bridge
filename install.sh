@@ -243,14 +243,35 @@ try:
     for base, vars in grouped.items():
         for profile in ["ro","rw"]:
             id_=f"auto-{profile}-{base}"
-            vmap={v:{} for v in sorted(vars)}
-            models[id_]={"name": id_, "variants": vmap}
-    # Only set if missing or incomplete
+            vmap={v:{"reasoningEffort":v} for v in sorted(vars)}
+            entry={"name": id_, "variants": vmap}
+            if vars:
+                entry["capabilities"]={"reasoning": True}
+            models[id_]=entry
     existing = data["provider"]["agy-bridge"].get("models")
-    if not existing or len(existing) < 14:
+    def _is_stale(m):
+        if not m or len(m) < 14:
+            return True
+        for _id, _ent in m.items():
+            _vars = _ent.get("variants")
+            if _vars is None:
+                return True
+            _caps = _ent.get("capabilities", {}).get("reasoning") if isinstance(_ent.get("capabilities"), dict) else None
+            _has = len(_vars) > 0
+            if _has and _caps is not True:
+                return True
+            if not _has and _caps is not None:
+                return True
+            for _k, _v in _vars.items():
+                if not isinstance(_v, dict) or _v.get("reasoningEffort") != _k:
+                    return True
+        return False
+    if _is_stale(existing):
         data["provider"]["agy-bridge"]["models"]=models
         changed = True
         print(f"  [✓] Generated {len(models)} static models with variants")
+        if existing and len(existing) >= 14:
+            print(f"  [✓] Healed stale models (missing capabilities/reasoningEffort)")
 except Exception as e:
     print(f"  [!] model generation failed: {e}", file=sys.stderr)
 
@@ -400,6 +421,41 @@ PYEOF
       echo "  [i] Auth auto-configured — verify: opencode models | grep agy-bridge"
     fi
   fi
+fi
+
+# 7. Patch gentle-ai TUI for agy-bridge effort (workaround for SDK overwriting capabilities.reasoning)
+# The @ai-sdk/openai-compatible provider enriches models and sets capabilities.reasoning=false
+# for agy-bridge, even though we set it true. The gentle-ai TUI gates on that flag.
+# This idempotent patch makes listReasoningEffortsFromModel accept variants.*.reasoningEffort
+# even when capabilities.reasoning is false, so /sdd-model effort works on fresh installs.
+TUI_JS="$HOME/.cache/opencode/packages/opencode-sdd-engram-manage@latest/node_modules/opencode-sdd-engram-manage/dist/tui.js"
+if [[ -f "$TUI_JS" ]]; then
+  if grep -q "hasReasoningEffort" "$TUI_JS" 2>/dev/null; then
+    echo "  [i] gentle-ai TUI already patched for agy-bridge effort"
+  else
+    if command -v python3 >/dev/null 2>&1; then
+      TUI_JS="$TUI_JS" python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path(__import__("os").environ["TUI_JS"])
+try:
+    text = p.read_text()
+    old = "function listReasoningEffortsFromModel(modelDef) {\n  if (!modelDef || modelDef?.capabilities?.reasoning !== true) return [];"
+    new = "function listReasoningEffortsFromModel(modelDef) {\n  if (!modelDef) return [];\n  const hasReasoningEffort = modelDef?.variants && typeof modelDef.variants === 'object' && Object.values(modelDef.variants).some(v => typeof v?.reasoningEffort === 'string' && v.reasoningEffort.trim());\n  if (modelDef?.capabilities?.reasoning !== true && !hasReasoningEffort) return [];"
+    if old in text:
+        text = text.replace(old, new)
+        p.write_text(text)
+        print("  [✓] Patched gentle-ai TUI for agy-bridge effort (listReasoningEffortsFromModel)")
+    else:
+        print("  [i] gentle-ai TUI patch not applied (pattern not found, may be already updated upstream)")
+except Exception as e:
+    print(f"  [!] TUI patch failed: {e}")
+PYEOF
+    else
+      echo "  [i] python3 not found — skipping gentle-ai TUI patch (manual: see docs)"
+    fi
+  fi
+else
+  echo "  [i] gentle-ai TUI not found at $TUI_JS (will be patched on first opencode run)"
 fi
 
 echo "==> Installation complete!"
