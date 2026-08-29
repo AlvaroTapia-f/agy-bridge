@@ -136,6 +136,29 @@ El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.j
 - `Host` guard en el bridge: solo `127.0.0.1:*` o `localhost:*` → `Host: evil.com` devuelve `403`.
 - Plugin (`agy-bridge.ts` + `agy-bridge-helpers.ts`) agrupa el catálogo por sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>` con `variants` (ej. `auto-ro-gemini-3.7-flash` → `high/medium/low`). La selección de variante (hook `chat.message` + wrapper `fetch` sobre `7421/v1/chat/completions`) reescribe `model` al wire `auto-ro/rw-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin variante elegida, el wrapper aplica default `medium` → `high` → `low` → `thinking`; singletons sin variants se envían verbatim. Fallback agrupado actual: 7 bases × 2 perfiles = 14 ids con variants. **Nunca** exponer ids bare `gemini-*`/`claude-*`.
 
+### Transparencia — parche gentle-ai TUI (effort)
+
+**Por qué existe:** el provider `agy-bridge` publica correctamente `capabilities: { reasoning: true }` + `variants.*.reasoningEffort` (verificado con `cat ~/.config/opencode/opencode.json | jq` y `deno test` 17/17). Sin embargo, el SDK `@ai-sdk/openai-compatible` que usa `opencode` para el provider `agy-bridge` **pisaba** `capabilities.reasoning` a `false` al enriquecer el modelo en `api.state.provider` (el que ve el TUI). Resultado: `/sdd-model` → effort mostraba `Model ... does not expose reasoning effort options` aunque el provider nativo y `/variant` andaban bien.
+
+**Qué hace el instalador (100% transparente):** `install.sh` sección **#7** parchea idempotentemente, si existe, el TUI cacheado de gentle-ai:
+
+```
+~/.cache/opencode/packages/opencode-sdd-engram-manage@latest/dist/tui.js
+  → listReasoningEffortsFromModel(modelDef)
+```
+
+Cambio exacto (no toca otra lógica):
+```js
+// antes: if (!modelDef || modelDef?.capabilities?.reasoning !== true) return [];
+// ahora: if (!modelDef) return [];
+//        const hasReasoningEffort = Object.values(modelDef.variants).some(v=>v.reasoningEffort)
+//        if (capabilities.reasoning !== true && !hasReasoningEffort) return [];
+```
+
+Así `/sdd-model` acepta `agy-bridge` cuando trae `variants.*.reasoningEffort` aunque el SDK lo haya dejado en `false`. Singletons sin variants (ej. `claude-sonnet-4-6`) siguen correctamente en `unsupported`.
+
+**Propiedades:** idempotente (`grep -q hasReasoningEffort` → `already patched`), no toca `agy-bridge.ts` ni systemd, se reaplica solo con `./install.sh`. Si `opencode update` regenera el cache, basta re-correr `./install.sh`. Cuando `gentle-ai` lo fixee upstream, el patrón ya no matchea y el instalador avisa `may be already updated upstream` sin romper nada. Verificable con `grep -n hasReasoningEffort .../tui.js`.
+
 ### Auth (sin secretos en repo)
 
 **Automático (recomendado en máquina nueva):** `./install.sh --with-auth` lee `AGY_TOKEN` de `~/.config/agy-bridge/env` y hace upsert en `~/.local/share/opencode/auth.json` preservando otras entradas, `chmod 600`, idempotente. No pisa `opencode-go` ni otras keys.
