@@ -34,12 +34,12 @@ long"). Verificado con payloads de ~190 KB.
 
 ## Requisitos
 
-Antes de instalar, verifica que tu máquina cumple con esto (el `install.sh` chequea los dos primeros y falla si faltan):
+Antes de instalar, verifica que tu máquina cumple con esto (el script canónico `install.sh` y el bootstrap `install-remote.sh` chequean los dos primeros y fallan si faltan):
 
 - **Google Antigravity con suscripción activa** y **`agy` CLI instalado y autenticado** (`agy --help` y `agy models` deben funcionar — el bridge solo spawnea `agy`, no hace login por vos).
-- **`deno` instalado** (`deno --version` — `install.sh` lo busca en `~/.deno/bin/deno`, `/usr/bin/deno`, etc.).
+- **`deno` instalado** (v2.9.5+ — `deno --version` — buscado en `PATH` y rutas estándar).
 - **`opencode` instalado** (v1.18+ — si no está `~/.config/opencode/opencode.json`, el installer saltea el provider y avisa).
-- **Linux con `systemd --user`** (para `agy-bridge.service` — sin systemd podés correr directo con `deno run`, ver Opción B).
+- **Linux con `systemd --user`** (para `agy-bridge.service` — sin systemd podés correr directo con `deno run`, ver Opción C).
 - **`python3`** (para generar `provider.agy-bridge` + modelos `auto-ro/rw-*` con variants en `opencode.json`).
 - **`openssl` o `xxd` + `/dev/urandom`** (para generar `AGY_TOKEN` de 24 bytes).
 - **Puerto `7421` libre en `127.0.0.1`** (bind loopback — configurable vía `PORT` en `~/.config/agy-bridge/env`).
@@ -47,9 +47,31 @@ Antes de instalar, verifica que tu máquina cumple con esto (el `install.sh` che
 
 ## Instalación
 
-### Opción A: Instalación Automática (Recomendada con systemd)
+### Opción A: One-Liner Remoto (Recomendada)
 
-`install.sh` hace 3 cosas automáticamente:
+Descarga el repositorio de forma segura y delega la ejecución en el instalador canónico `install.sh`:
+
+```sh
+# Instalación estándar (auth manual vía /connect)
+curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/install-remote.sh | bash
+
+# Con configuración automática de auth.json (recomendado para máquina limpia)
+curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/install-remote.sh | bash -s -- --with-auth
+```
+
+> **Auditoría e inocuidad:** Podés auditar el script antes de ejecutarlo con:
+> ```sh
+> curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/install-remote.sh | less
+> ```
+> El script **no requiere ni utiliza `sudo`**, no almacena ni imprime tokens literales, descarga/clona el repositorio en `AGY_BRIDGE_DIR` (`~/.local/share/agy-bridge` por defecto) y `exec`uta el instalador canónico `install.sh`.
+
+Variables de entorno configurables:
+- `AGY_BRIDGE_DIR`: Directorio destino (default: `~/.local/share/agy-bridge` o `$XDG_DATA_HOME/agy-bridge`).
+- `AGY_BRIDGE_REF`: Rama, tag o commit a clonar/descargar (default: `main`). Ejemplo: `AGY_BRIDGE_REF=v0.2.0 curl -fsSL ... | bash`.
+
+### Opción B: Instalación Local vía `install.sh` (Canónica)
+
+`install.sh` es el instalador canónico del proyecto. Realiza la configuración localmente:
 
 - **Entorno:** detecta rutas de `deno`/`agy`, inicializa `~/.config/agy-bridge/env` (desde [`.env.example`](.env.example)).
 - **Agentes:** copia perfiles `raw`, `worker-ro`, `worker-rw` a `~/.gemini/config/agents/`.
@@ -64,7 +86,7 @@ Flags disponibles:
 - `--force`: sobrescribe configuraciones existentes en `~/.gemini/config/agents/`.
 - `--with-auth`: configura `~/.local/share/opencode/auth.json` con `AGY_TOKEN` de `~/.config/agy-bridge/env` como `{"agy-bridge":{"type":"api","key":"..."}}`, preservando otras keys, `chmod 600`, idempotente. Sin el flag, la auth es manual vía `/connect` (ver abajo).
 
-### Opción B: Instalación Manual
+### Opción C: Instalación Manual
 
 Si no utilizas systemd o prefieres configurar todo a mano, replica lo que hace `install.sh`:
 

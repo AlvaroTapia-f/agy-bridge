@@ -2,7 +2,9 @@
 set -euo pipefail
 
 # ==============================================================================
-# agy-bridge installer
+# agy-bridge installer (canonical)
+# Note: install-remote.sh provides a remote curl bootstrap that fetches the repo
+# and delegates execution to this script.
 # ==============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
