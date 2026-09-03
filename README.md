@@ -40,7 +40,7 @@ Antes de instalar, verifica que tu máquina cumple con esto (el script canónico
 - **`deno` instalado** (v2.9.5+ — `deno --version` — buscado en `PATH` y rutas estándar).
 - **`opencode` instalado** (v1.18+ — si no está `~/.config/opencode/opencode.json`, el installer saltea el provider y avisa).
 - **Linux con `systemd --user`** (para `agy-bridge.service` — sin systemd podés correr directo con `deno run`, ver Opción C).
-- **`python3`** (para generar `provider.agy-bridge` + modelos `auto-ro/rw-*` con variants en `opencode.json`).
+- **`python3`** (utilizado para configuración base de provider/auth y como fallback de modelos si Deno no estuviera disponible).
 - **`openssl` o `xxd` + `/dev/urandom`** (para generar `AGY_TOKEN` de 24 bytes).
 - **Puerto `7421` libre en `127.0.0.1`** (bind loopback — configurable vía `PORT` en `~/.config/agy-bridge/env`).
 - **Permisos:** `~/.config/agy-bridge/env` y `~/.local/share/opencode/auth.json` quedan en `chmod 600` automáticamente.
@@ -75,10 +75,10 @@ Variables de entorno configurables:
 
 - **Entorno:** detecta rutas de `deno`/`agy`, inicializa `~/.config/agy-bridge/env` (desde [`.env.example`](.env.example)).
 - **Agentes:** copia perfiles `raw`, `worker-ro`, `worker-rw` a `~/.gemini/config/agents/`.
-- **Provider + plugin + modelos:** registra provider `agy-bridge` (`baseURL: "http://127.0.0.1:7421/v1"`), instala `~/.config/opencode/plugins/agy-bridge.ts` (+ `agy-bridge-helpers.ts`) y genera modelos `auto-ro/rw-*` con `variants` dinámicos (consulta `GET /v1/models`; fallback agrupado si el bridge no responde).
+- **Provider + plugin + modelos:** registra provider `agy-bridge` (`baseURL: "http://127.0.0.1:7421/v1"`), instala `~/.config/opencode/plugins/agy-bridge.ts` y sincroniza en vivo los modelos `auto-ro/rw-*` con `variants` dinámicos delegando en `scripts/sync-models.ts` (resolución en 3 niveles: `agy models` TSV → `GET /v1/models` → fallback agrupado).
 
 ```sh
-./install.sh                 # provider + plugin + modelos (auth manual vía /connect)
+./install.sh                 # provider + plugin + sincronización de modelos (auth manual vía /connect)
 ./install.sh --with-auth     # + auth.json automático (recomendado para máquina limpia)
 ```
 
@@ -157,6 +157,28 @@ El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.j
 - `baseURL` **debe** terminar en `/v1` — el SDK añade `/chat/completions` (sin `/v1` obtienes `404`).
 - `Host` guard en el bridge: solo `127.0.0.1:*` o `localhost:*` → `Host: evil.com` devuelve `403`.
 - Plugin (`agy-bridge.ts` + `agy-bridge-helpers.ts`) agrupa el catálogo por sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>` con `variants` (ej. `auto-ro-gemini-3.7-flash` → `high/medium/low`). La selección de variante (hook `chat.message` + wrapper `fetch` sobre `7421/v1/chat/completions`) reescribe `model` al wire `auto-ro/rw-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin variante elegida, el wrapper aplica default `medium` → `high` → `low` → `thinking`; singletons sin variants se envían verbatim. Fallback agrupado actual: 7 bases × 2 perfiles = 14 ids con variants. **Nunca** exponer ids bare `gemini-*`/`claude-*`.
+
+### Sincronización de Modelos (`sync:models`)
+
+Cada instalación o actualización con `install.sh` sincroniza automáticamente el catálogo en vivo desde `agy models` TSV hacia `~/.config/opencode/opencode.json` sin duplicar configuraciones ni tocar otros providers. Para resincronizar modelos en cualquier momento sin correr el instalador completo:
+
+```sh
+# Sincronización estándar a ~/.config/opencode/opencode.json
+deno task sync:models
+
+# Previsualizar el mapa de modelos generado sin escribir archivos
+deno task sync:models --dry-run
+
+# Especificar ruta custom de configuración o binario agy alternativo
+deno run --allow-run=agy --allow-net=127.0.0.1:7421 --allow-read --allow-write --allow-env scripts/sync-models.ts --config-path /ruta/custom/opencode.json
+```
+
+**Resolución en 3 niveles y Dynamic Effort:**
+1. `agy models` (TSV en vivo sin necesidad de auth previa del bridge)
+2. `GET /v1/models` (endpoint del bridge local)
+3. Catálogo base fallback (7 bases agrupadas → 14 modelos `auto-ro/rw-*`)
+
+Cualquier nuevo modelo o esfuerzo de razonamiento expuesto por Antigravity (como `high`, `medium`, `low`, `thinking`, `ultra`) se infiere y agrupa dinámicamente bajo su base correspondiente (`auto-ro-<base>` / `auto-rw-<base>`) con `variants.<effort>.reasoningEffort`. Nunca se exponen ids bare `gemini-*`/`claude-*` directamente en el provider.
 
 ### Transparencia — parche gentle-ai TUI (effort)
 
