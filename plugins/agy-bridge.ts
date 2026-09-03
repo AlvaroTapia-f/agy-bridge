@@ -5,6 +5,7 @@ import type { Plugin } from "@opencode-ai/plugin"
 type ModelV2 = Record<string, unknown> & { id: string; name: string; variants?: Record<string, unknown> }
 type ProviderV2 = Record<string, unknown> & { id: string }
 
+// LOCKSTEP:plugin-4pass-live
 const FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -20,12 +21,19 @@ const FALLBACK_MODELS = [
   "claude-sonnet-4-6",
   "claude-opus-4-6-thinking",
   "gpt-oss-120b-medium",
+  "gemini-3.8-flash-high",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-low",
 ] as const
 
 const EFFORT_SUFFIXES = ["high", "medium", "low", "thinking"] as const
 
-function stripEffortSuffix(slug: string): { base: string; variant?: string } {
-  for (const suffix of EFFORT_SUFFIXES) {
+function stripEffortSuffix(
+  slug: string,
+  extraSuffixes?: readonly string[],
+): { base: string; variant?: string } {
+  const suffixes = extraSuffixes ? [...EFFORT_SUFFIXES, ...extraSuffixes] : EFFORT_SUFFIXES
+  for (const suffix of suffixes) {
     const needle = `-${suffix}`
     if (slug.endsWith(needle)) {
       return { base: slug.slice(0, -needle.length), variant: suffix }
@@ -34,13 +42,72 @@ function stripEffortSuffix(slug: string): { base: string; variant?: string } {
   return { base: slug }
 }
 
-function groupBases(slugs: readonly string[]): Map<string, Set<string>> {
+export function groupBases(slugs: readonly string[]): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>()
+  const unassigned: string[] = []
+
+  // Pass 1: standard known effort suffixes
   for (const slug of slugs) {
     const { base, variant } = stripEffortSuffix(slug)
-    if (!map.has(base)) map.set(base, new Set<string>())
-    if (variant) map.get(base)!.add(variant)
+    if (variant) {
+      if (!map.has(base)) map.set(base, new Set<string>())
+      map.get(base)!.add(variant)
+    } else {
+      unassigned.push(slug)
+    }
   }
+
+  // Pass 2: match unassigned slugs against known bases (e.g. gemini-3.8-flash-ultra matching gemini-3.8-flash)
+  const remaining: string[] = []
+  for (const slug of unassigned) {
+    let matched = false
+    for (const knownBase of map.keys()) {
+      if (slug.startsWith(`${knownBase}-`)) {
+        const variant = slug.slice(knownBase.length + 1)
+        if (variant && !variant.includes("/")) {
+          map.get(knownBase)!.add(variant)
+          matched = true
+          break
+        }
+      }
+    }
+    if (!matched) {
+      remaining.push(slug)
+    }
+  }
+
+  // Pass 3: detect new multi-variant bases sharing a prefix before last '-'
+  // e.g. ["gemini-3.9-pro-ultra", "gemini-3.9-pro-max"]
+  const prefixMap = new Map<string, string[]>()
+  for (const slug of remaining) {
+    const lastDash = slug.lastIndexOf("-")
+    if (lastDash > 0) {
+      const baseCandidate = slug.slice(0, lastDash)
+      const variantCandidate = slug.slice(lastDash + 1)
+      if (/^[a-zA-Z]+$/.test(variantCandidate)) {
+        if (!prefixMap.has(baseCandidate)) prefixMap.set(baseCandidate, [])
+        prefixMap.get(baseCandidate)!.push(slug)
+      }
+    }
+  }
+
+  const finalRemaining = new Set(remaining)
+  for (const [baseCandidate, group] of prefixMap.entries()) {
+    if (group.length > 1) {
+      if (!map.has(baseCandidate)) map.set(baseCandidate, new Set<string>())
+      for (const slug of group) {
+        const variant = slug.slice(baseCandidate.length + 1)
+        map.get(baseCandidate)!.add(variant)
+        finalRemaining.delete(slug)
+      }
+    }
+  }
+
+  // Pass 4: singletons (no variants)
+  for (const slug of finalRemaining) {
+    if (!map.has(slug)) map.set(slug, new Set<string>())
+  }
+
   return map
 }
 

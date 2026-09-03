@@ -3,6 +3,8 @@
 import { assertEquals } from "jsr:@std/assert";
 import { stripEffortSuffix, groupBases, wireModel, FALLBACK_MODELS, buildModelMap } from "./agy-bridge-helpers.ts";
 
+import { groupBases as pluginGroupBases } from "./agy-bridge.ts";
+
 Deno.test("stripEffortSuffix: gemini-3.7-flash-high → base+high", () => {
   const r = stripEffortSuffix("gemini-3.7-flash-high");
   assertEquals(r.base, "gemini-3.7-flash");
@@ -27,12 +29,14 @@ Deno.test("stripEffortSuffix: gpt-oss-120b-medium → base+medium", () => {
   assertEquals(r.variant, "medium");
 });
 
-Deno.test("groupBases: 14 FALLBACK → 7 bases with variant subsets", () => {
+Deno.test("groupBases: 17 FALLBACK → 8 bases with variant subsets", () => {
   const grouped = groupBases(FALLBACK_MODELS);
-  // Should dedupe to 7 distinct bases
-  assertEquals(grouped.size, 7);
+  // Should dedupe to 8 distinct bases (17 slugs)
+  assertEquals(grouped.size, 8);
   const flash37 = grouped.get("gemini-3.7-flash");
   assertEquals(flash37, new Set(["high", "medium", "low"]));
+  const flash38 = grouped.get("gemini-3.8-flash");
+  assertEquals(flash38, new Set(["high", "medium", "low"]));
   const singleton = grouped.get("claude-sonnet-4-6");
   assertEquals(singleton, new Set());
   const opus = grouped.get("claude-opus-4-6");
@@ -48,14 +52,17 @@ Deno.test("wireModel: no variant yields verbatim", () => {
   assertEquals(wireModel("auto-ro-claude-sonnet-4-6", undefined), "auto-ro-claude-sonnet-4-6");
 });
 
-Deno.test("buildModelMap: FALLBACK grouped -> 14 auto-ro/rw ids with variants", async () => {
+Deno.test("buildModelMap: FALLBACK grouped -> 16 auto-ro/rw ids with variants", async () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
-  // 7 bases *2 profiles = 14 ids
-  assertEquals(Object.keys(map).length, 14);
+  // 8 bases * 2 profiles = 16 ids
+  assertEquals(Object.keys(map).length, 16);
   // picker for gemini-3.7-flash should show high/medium/low
   const m = map["auto-ro-gemini-3.7-flash"] as unknown as { variants: Record<string, unknown> };
   assertEquals(Object.keys(m.variants).sort(), ["high", "low", "medium"]);
+  // picker for gemini-3.8-flash should show high/medium/low
+  const m38 = map["auto-ro-gemini-3.8-flash"] as unknown as { variants: Record<string, unknown> };
+  assertEquals(Object.keys(m38.variants).sort(), ["high", "low", "medium"]);
   // singleton has no variants
   const singleton = map["auto-ro-claude-sonnet-4-6"] as unknown as { variants: Record<string, unknown> };
   assertEquals(Object.keys(singleton.variants).length, 0);
@@ -64,6 +71,33 @@ Deno.test("buildModelMap: FALLBACK grouped -> 14 auto-ro/rw ids with variants", 
     const bare = id.startsWith("gemini-") || id.startsWith("claude-") || id.startsWith("gpt-");
     assertEquals(bare, false);
   }
+});
+
+Deno.test("parity: plugin groupBases equals helpers groupBases on FALLBACK_MODELS", () => {
+  const pluginGrouped = pluginGroupBases(FALLBACK_MODELS);
+  const helperGrouped = groupBases(FALLBACK_MODELS);
+  assertEquals(pluginGrouped.size, helperGrouped.size);
+  for (const [k, v] of helperGrouped.entries()) {
+    assertEquals(pluginGrouped.get(k), v);
+  }
+  assertEquals(buildModelMap(pluginGrouped), buildModelMap(helperGrouped));
+});
+
+Deno.test("parity: plugin groupBases equals helpers groupBases on dynamic multi-pass cases", () => {
+  const testSlugs = [
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-ultra",
+    "gemini-3.9-pro-max",
+    "gemini-3.9-pro-ultra",
+    "singleton-model",
+  ];
+  const pluginGrouped = pluginGroupBases(testSlugs);
+  const helperGrouped = groupBases(testSlugs);
+  assertEquals(pluginGrouped.size, helperGrouped.size);
+  for (const [k, v] of helperGrouped.entries()) {
+    assertEquals(pluginGrouped.get(k), v);
+  }
+  assertEquals(buildModelMap(pluginGrouped), buildModelMap(helperGrouped));
 });
 
 Deno.test("groupBases: gemini-3.1-pro-high/low -> {high,low} subset", () => {
@@ -91,9 +125,13 @@ Deno.test("provider hook fallback: returns grouped models when bridge unreachabl
   const ids = Object.keys(models);
   const hasBare = ids.some((id) => !id.startsWith("auto-ro-") && !id.startsWith("auto-rw-"));
   assertEquals(hasBare, false);
-  // should contain expected base
+  // should contain 16 ids
+  assertEquals(ids.length, 16);
+  // should contain expected bases
   assertEquals(ids.includes("auto-ro-gemini-3.7-flash"), true);
   assertEquals(ids.includes("auto-rw-gemini-3.7-flash"), true);
+  assertEquals(ids.includes("auto-ro-gemini-3.8-flash"), true);
+  assertEquals(ids.includes("auto-rw-gemini-3.8-flash"), true);
 });
 
 Deno.test("fetch wrapper: variant maps to suffixed wire model (unit via wireModel)", () => {

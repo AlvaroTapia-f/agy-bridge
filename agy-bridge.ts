@@ -46,6 +46,7 @@ const STATE_DIR = Deno.env.get("STATE_DIR") ??
   `${Deno.env.get("HOME")}/.local/state/agy-bridge`;
 const USAGE_LOG = `${STATE_DIR}/usage.jsonl`;
 
+// LOCKSTEP:plugin-4pass-live
 const FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -61,6 +62,9 @@ const FALLBACK_MODELS = [
   "claude-sonnet-4-6",
   "claude-opus-4-6-thinking",
   "gpt-oss-120b-medium",
+  "gemini-3.8-flash-high",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-low",
 ];
 
 // ---------- autonomous delegation (models prefixed "auto-<profile>-") ----------

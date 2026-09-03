@@ -2,11 +2,11 @@ schema: spec-driven
 
 context: |
   Project: agy-bridge — local OpenAI-compatible bridge to the official Antigravity CLI (`agy`) in headless mode.
-  Stack: Deno 2.9.5 (TypeScript, single-file service agy-bridge.ts). No Node/npm, no package.json, no deno.json.
+  Stack: Deno 2.9.5 (TypeScript, single-file service agy-bridge.ts, deno.json with import stubs). No Node/npm/package.json.
   Runtime: systemd user service `agy-bridge.service` launches `deno run` with scoped `--allow-*` permissions.
   Architecture: std-library HTTP server (Deno.serve-style handlers) that spawns the official `agy` binary per request; never talks to Google directly.
   Conventions: English code/comments; quality via built-in `deno check`/`deno lint`/`deno fmt` (no config files yet).
-  SDD session: execution_mode=interactive, artifact_store=openspec, delivery_strategy=ask-on-risk, review_budget_lines=400.
+  SDD session: execution_mode=interactive, artifact_store=both, delivery_strategy=ask-on-risk, review_budget_lines=400 (hybrid: openspec + engram).
 
 rules:
   proposal:
