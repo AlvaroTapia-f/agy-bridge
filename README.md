@@ -156,7 +156,7 @@ El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.j
 
 - `baseURL` **debe** terminar en `/v1` — el SDK añade `/chat/completions` (sin `/v1` obtienes `404`).
 - `Host` guard en el bridge: solo `127.0.0.1:*` o `localhost:*` → `Host: evil.com` devuelve `403`.
-- Plugin (`agy-bridge.ts` + `agy-bridge-helpers.ts`) agrupa el catálogo por sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>` con `variants` (ej. `auto-ro-gemini-3.7-flash` → `high/medium/low`). La selección de variante (hook `chat.message` + wrapper `fetch` sobre `7421/v1/chat/completions`) reescribe `model` al wire `auto-ro/rw-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin variante elegida, el wrapper aplica default `medium` → `high` → `low` → `thinking`; singletons sin variants se envían verbatim. Fallback agrupado actual: 7 bases × 2 perfiles = 14 ids con variants. **Nunca** exponer ids bare `gemini-*`/`claude-*`.
+- Plugin (`agy-bridge.ts` + `agy-bridge-helpers.ts`) agrupa el catálogo por sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>` con `variants` (ej. `auto-ro-gemini-3.7-flash` → `high/medium/low`). La selección de variante (hook `chat.message` + wrapper `fetch` sobre `7421/v1/chat/completions`) reescribe `model` al wire `auto-ro/rw-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin variante elegida, el wrapper aplica default `medium` → `high` → `low` → `thinking`; singletons sin variants se envían verbatim. Fallback agrupado actual: 8 bases × 2 perfiles = 16 ids con variants. **Nunca** exponer ids bare `gemini-*`/`claude-*`.
 
 ### Sincronización de Modelos (`sync:models`)
 
@@ -176,7 +176,7 @@ deno run --allow-run=agy --allow-net=127.0.0.1:7421 --allow-read --allow-write -
 **Resolución en 3 niveles y Dynamic Effort:**
 1. `agy models` (TSV en vivo sin necesidad de auth previa del bridge)
 2. `GET /v1/models` (endpoint del bridge local)
-3. Catálogo base fallback (7 bases agrupadas → 14 modelos `auto-ro/rw-*`)
+3. Catálogo base fallback (8 bases agrupadas → 16 modelos `auto-ro/rw-*`)
 
 Cualquier nuevo modelo o esfuerzo de razonamiento expuesto por Antigravity (como `high`, `medium`, `low`, `thinking`, `ultra`) se infiere y agrupa dinámicamente bajo su base correspondiente (`auto-ro-<base>` / `auto-rw-<base>`) con `variants.<effort>.reasoningEffort`. Nunca se exponen ids bare `gemini-*`/`claude-*` directamente en el provider.
 
@@ -291,7 +291,7 @@ auto-ro:    opencode ──1 request──▶ bridge ──1 sesión───▶
 - **Perfil** = agente con whitelist propia (`~/.gemini/config/agents/`):
   - `ro` → `worker-ro`: `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_url_content`, `search_web` (~7.4k harness).
   - `rw` → `worker-rw`: `ro` + `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` (~9.8k harness). No hace `commit`/`push` sin pedido explícito. OJO: `sed_file`, `command_status`, `send_command_input`, `wait_5_seconds` rompen la init.
-- **Motor** = cualquier modelo como sufijo (`auto-ro-<modelo>` / `auto-rw-<modelo>`). El provider genera la matriz dinámicamente desde `GET /v1/models` (o fallback 7 bases × 2) y el bridge valida en `parseAutoModel`. Los ids bare stateless fueron removidos del provider; el bridge conserva el path `raw`/bare como escape hatch para API directa.
+- **Motor** = cualquier modelo como sufijo (`auto-ro-<modelo>` / `auto-rw-<modelo>`). El provider genera la matriz dinámicamente desde `GET /v1/models` (o fallback 8 bases × 2) y el bridge valida en `parseAutoModel`. Los ids bare stateless fueron removidos del provider; el bridge conserva el path `raw`/bare como escape hatch para API directa.
 - Streaming bufferizado + SSE `: keepalive` cada 10s (deltas intermedios no garantizan igualar al final con tools nativas). `delta_chars` se loguea para medición.
 
 ## Consumo de cuota (vigilar)
