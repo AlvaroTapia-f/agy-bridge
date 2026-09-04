@@ -39,8 +39,9 @@ export interface ResolveSlugsResult {
 export interface ResolveSlugsOptions {
   agyBin?: string;
   bridgeUrl?: string;
+  token?: string;
   runner?: (cmd: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
-  fetcher?: (url: string) => Promise<Response>;
+  fetcher?: (url: string, init?: RequestInit) => Promise<Response>;
 }
 
 export interface SyncFs {
@@ -147,12 +148,13 @@ export async function resolveSlugs(
   // Tier 2: Bridge API GET /v1/models
   try {
     const url = `${bridgeUrl.replace(/\/+$/, "")}/v1/models`;
-    const token = safeEnvGet("AGY_TOKEN");
+    const token = options.token || safeEnvGet("AGY_TOKEN");
     const headers: Record<string, string> = {};
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
-    const resp = await fetcher(url);
+    const init: RequestInit = Object.keys(headers).length > 0 ? { headers } : {};
+    const resp = await fetcher(url, init);
     if (resp.ok) {
       const data = (await resp.json()) as { data?: Array<{ id?: string }> };
       if (data && Array.isArray(data.data)) {

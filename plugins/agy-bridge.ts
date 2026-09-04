@@ -128,7 +128,12 @@ function buildModelMap(bases: Map<string, Set<string>>): Record<string, ModelV2>
         id,
         name: id,
         provider: { id: "agy-bridge", name: "AGY Bridge" } as unknown as ModelV2["provider"],
-        ...(variants.size ? { capabilities: { reasoning: true as const } } : {}),
+        ...(variants.size
+          ? {
+              reasoning: true as const,
+              interleaved: { field: "reasoning_content" as const },
+            }
+          : {}),
         variants: variantMap,
       } as unknown as ModelV2
     }
@@ -155,7 +160,6 @@ const FALLBACK_GROUPED = groupBases([...FALLBACK_MODELS])
 
 // variant picked in TUI via chat.message hook (opencode does NOT send variant in fetch body)
 const variantByModel = new Map<string, string>()
-const variantBySession = new Map<string, string>()
 
 function defaultVariantForBase(base: string): string | undefined {
   const variants = FALLBACK_GROUPED.get(base)
@@ -290,7 +294,6 @@ const AgyBridgePlugin: Plugin = async (_input) => {
       try {
         if (input.variant && input.model?.modelID) {
           variantByModel.set(input.model.modelID, input.variant)
-          if (input.sessionID) variantBySession.set(input.sessionID, input.variant)
         }
       } catch {}
     },

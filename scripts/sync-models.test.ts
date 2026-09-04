@@ -72,11 +72,15 @@ Deno.test("dynamic effort: gemini-3.8-flash-ultra is grouped under gemini-3.8-fl
 
   const map = buildModelMap(grouped);
   const ro = map["auto-ro-gemini-3.8-flash"] as {
-    capabilities?: { reasoning?: boolean };
+    reasoning?: boolean;
+    interleaved?: { field: string };
+    capabilities?: unknown;
     variants: Record<string, { reasoningEffort: string }>;
   };
   assertExists(ro);
-  assertEquals(ro.capabilities?.reasoning, true);
+  assertEquals(ro.reasoning, true);
+  assertEquals(ro.interleaved, { field: "reasoning_content" });
+  assertEquals(ro.capabilities, undefined);
   assertEquals(ro.variants.ultra.reasoningEffort, "ultra");
   assertEquals(ro.variants.high.reasoningEffort, "high");
 });
@@ -91,11 +95,15 @@ Deno.test("dynamic effort: multi-variant base with unknown suffixes groups clean
 
   const map = buildModelMap(grouped);
   const rw = map["auto-rw-gemini-3.9-pro"] as {
-    capabilities?: { reasoning?: boolean };
+    reasoning?: boolean;
+    interleaved?: { field: string };
+    capabilities?: unknown;
     variants: Record<string, { reasoningEffort: string }>;
   };
   assertExists(rw);
-  assertEquals(rw.capabilities?.reasoning, true);
+  assertEquals(rw.reasoning, true);
+  assertEquals(rw.interleaved, { field: "reasoning_content" });
+  assertEquals(rw.capabilities, undefined);
   assertEquals(rw.variants.ultra.reasoningEffort, "ultra");
   assertEquals(rw.variants.max.reasoningEffort, "max");
 });
@@ -108,26 +116,38 @@ Deno.test("dynamic effort: FALLBACK_MODELS equivalence (8 bases, 16 models, corr
 
   // Check singletons vs non-singletons
   const singleton = map["auto-ro-claude-sonnet-4-6"] as {
-    capabilities?: { reasoning?: boolean };
+    reasoning?: boolean;
+    interleaved?: unknown;
+    capabilities?: unknown;
     variants: Record<string, unknown>;
   };
-  assertEquals(singleton.capabilities?.reasoning, undefined);
+  assertEquals(singleton.reasoning, undefined);
+  assertEquals(singleton.interleaved, undefined);
+  assertEquals(singleton.capabilities, undefined);
   assertEquals(Object.keys(singleton.variants).length, 0);
 
   const flash37 = map["auto-rw-gemini-3.7-flash"] as {
-    capabilities?: { reasoning?: boolean };
+    reasoning?: boolean;
+    interleaved?: { field: string };
+    capabilities?: unknown;
     variants: Record<string, { reasoningEffort: string }>;
   };
-  assertEquals(flash37.capabilities?.reasoning, true);
+  assertEquals(flash37.reasoning, true);
+  assertEquals(flash37.interleaved, { field: "reasoning_content" });
+  assertEquals(flash37.capabilities, undefined);
   assertEquals(flash37.variants.high.reasoningEffort, "high");
   assertEquals(flash37.variants.medium.reasoningEffort, "medium");
   assertEquals(flash37.variants.low.reasoningEffort, "low");
 
   const flash38 = map["auto-rw-gemini-3.8-flash"] as {
-    capabilities?: { reasoning?: boolean };
+    reasoning?: boolean;
+    interleaved?: { field: string };
+    capabilities?: unknown;
     variants: Record<string, { reasoningEffort: string }>;
   };
-  assertEquals(flash38.capabilities?.reasoning, true);
+  assertEquals(flash38.reasoning, true);
+  assertEquals(flash38.interleaved, { field: "reasoning_content" });
+  assertEquals(flash38.capabilities, undefined);
   assertEquals(flash38.variants.high.reasoningEffort, "high");
   assertEquals(flash38.variants.medium.reasoningEffort, "medium");
   assertEquals(flash38.variants.low.reasoningEffort, "low");
@@ -173,6 +193,81 @@ Deno.test("resolveSlugs: tier 1 fails (non-zero exit) -> tier 2 API success retu
     "gemini-3.7-flash-high",
     "claude-opus-4-6-thinking",
   ]);
+});
+
+Deno.test("5.1 RED test: fetcher receives Authorization: Bearer header", async () => {
+  let capturedUrl = "";
+  let capturedInit: RequestInit | undefined;
+
+  const mockRunner = () =>
+    Promise.resolve({
+      code: 1,
+      stdout: "",
+      stderr: "error: unauthenticated",
+    });
+  const mockFetcher = (url: string, init?: RequestInit) => {
+    capturedUrl = url;
+    capturedInit = init;
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          data: [{ id: "gemini-3.8-flash-high" }],
+        }),
+        { status: 200 },
+      ),
+    );
+  };
+
+  const res = await resolveSlugs({
+    runner: mockRunner,
+    fetcher: mockFetcher,
+    token: "secret-test-token-12345",
+  });
+
+  assertEquals(res.source, "api");
+  assertEquals(capturedUrl, "http://127.0.0.1:7421/v1/models");
+  assertEquals(
+    (capturedInit?.headers as Record<string, string>)?.[
+      "Authorization"
+    ],
+    "Bearer secret-test-token-12345",
+  );
+});
+
+Deno.test("5.1 triangulation: fetcher omits Authorization header when token is empty", async () => {
+  let capturedInit: RequestInit | undefined;
+
+  const mockRunner = () =>
+    Promise.resolve({
+      code: 1,
+      stdout: "",
+      stderr: "error: unauthenticated",
+    });
+  const mockFetcher = (_url: string, init?: RequestInit) => {
+    capturedInit = init;
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          data: [{ id: "gemini-3.8-flash-high" }],
+        }),
+        { status: 200 },
+      ),
+    );
+  };
+
+  const res = await resolveSlugs({
+    runner: mockRunner,
+    fetcher: mockFetcher,
+    token: "",
+  });
+
+  assertEquals(res.source, "api");
+  assertEquals(
+    (capturedInit?.headers as Record<string, string> | undefined)?.[
+      "Authorization"
+    ],
+    undefined,
+  );
 });
 
 Deno.test("resolveSlugs: tier 1 runner throws (bad binary) -> tier 2 API success", async () => {
@@ -356,12 +451,22 @@ Deno.test("syncModels: atomic write preserves other providers and creates .bak b
   );
   assertEquals(
     updatedConfig.provider["agy-bridge"].models["auto-ro-gemini-3.7-flash"]
-      .capabilities.reasoning,
+      .reasoning,
     true,
   );
   assertEquals(
+    updatedConfig.provider["agy-bridge"].models["auto-ro-gemini-3.7-flash"]
+      .interleaved,
+    { field: "reasoning_content" },
+  );
+  assertEquals(
     updatedConfig.provider["agy-bridge"].models["auto-ro-claude-sonnet-4-6"]
-      .capabilities?.reasoning,
+      .reasoning,
+    undefined,
+  );
+  assertEquals(
+    updatedConfig.provider["agy-bridge"].models["auto-ro-claude-sonnet-4-6"]
+      .capabilities,
     undefined,
   );
 });

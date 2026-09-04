@@ -10,6 +10,12 @@
 // Run: deno run --allow-net --allow-run=$AGY_BIN \
 //        --allow-write=$HOME/.local/state/agy-bridge agy-bridge.ts
 
+import {
+  createNoteClassifier,
+  FALLBACK_MODELS,
+  NARRATION_SUFFIX,
+} from "./plugins/agy-bridge-helpers.ts";
+
 // ---------- config ----------
 
 const PORT = Number(Deno.env.get("PORT") ?? 7421);
@@ -45,27 +51,6 @@ const AGY_TOKEN = Deno.env.get("AGY_TOKEN") ?? "";
 const STATE_DIR = Deno.env.get("STATE_DIR") ??
   `${Deno.env.get("HOME")}/.local/state/agy-bridge`;
 const USAGE_LOG = `${STATE_DIR}/usage.jsonl`;
-
-// LOCKSTEP:plugin-4pass-live
-const FALLBACK_MODELS = [
-  "gemini-3.7-flash-high",
-  "gemini-3.7-flash-medium",
-  "gemini-3.7-flash-low",
-  "gemini-3.6-flash-high",
-  "gemini-3.6-flash-medium",
-  "gemini-3.6-flash-low",
-  "gemini-3.5-flash-high",
-  "gemini-3.5-flash-medium",
-  "gemini-3.5-flash-low",
-  "gemini-3.1-pro-high",
-  "gemini-3.1-pro-low",
-  "claude-sonnet-4-6",
-  "claude-opus-4-6-thinking",
-  "gpt-oss-120b-medium",
-  "gemini-3.8-flash-high",
-  "gemini-3.8-flash-medium",
-  "gemini-3.8-flash-low",
-];
 
 // ---------- autonomous delegation (models prefixed "auto-<profile>-") ----------
 //
@@ -196,7 +181,7 @@ async function acquire(): Promise<() => void> {
 
 // ---------- models ----------
 
-let modelSlugs: string[] = FALLBACK_MODELS;
+let modelSlugs: string[] = [...FALLBACK_MODELS];
 
 async function refreshModels(): Promise<string[]> {
   const { out, code } = await runCapture([AGY_BIN, "models"], {
@@ -394,14 +379,6 @@ Complete the task above autonomously, using your tools as many times as needed.
 When finished, your final message must be the complete deliverable requested:
 self-contained and ready to be consumed by an orchestrator without further
 context.`;
-
-// Narration disclosure (bridge-live-thoughts Phase 6): appended to the
-// autonomous prompt ONLY in the streaming branch of handleAutonomousChat so
-// intermediate agent_response deltas narrate tool activity live. Non-auto
-// paths (renderPrompt/preparePrompt) and non-streaming calls never see it.
-// Mirrored in plugins/agy-bridge-helpers.ts for unit tests — keep in sync.
-const NARRATION_SUFFIX =
-  "IMPORTANT: before every tool call, first emit one short line starting with NOTE: explaining what you are about to do and why. Keep each NOTE to one sentence.";
 
 function renderAutonomousPrompt(req: OAIChatRequest): RenderedPrompt {
   const system: string[] = [];
@@ -905,10 +882,10 @@ async function handleAutonomousChat(
     });
   }
 
-  // Streaming: agy's step deltas are NOT guaranteed to equal the final
-  // result.response once native tools run mid-turn, so we deliver the final
-  // text in one chunk and keep the connection alive with SSE comments
-  // (": keepalive") while agy works. delta_chars is logged for measurement.
+  // Streaming: step deltas stream incrementally via the NOTE-aware classifier;
+  // NOTE narration routes to reasoning_content, while the final answer routes
+  // to content. Connection is kept alive with SSE comments (": keepalive")
+  // during idle tool execution. delta_chars is logged for measurement.
   const sse = new ReadableStream<Uint8Array>({
     async start(controller) {
       // Self-defending sender: when the client disconnects (or the stream is
@@ -938,18 +915,15 @@ async function handleAutonomousChat(
       try {
         chunk({ role: "assistant" });
         const streamingPrompt = prepared.prompt + NARRATION_SUFFIX;
+        const classifier = createNoteClassifier({
+          chunk: (d) => chunk(d),
+          log,
+        });
         const r = await runAgy(auto.real, streamingPrompt, {
-          onDelta: (kind, d) => {
-            if (!d) return;
-            log.delta_chars += d.length;
-            if (kind === "agent_response") {
-              chunk({ content: d });
-            } else {
-              chunk({ reasoning_content: d });
-            }
-          },
+          onDelta: (kind, d) => classifier.onDelta(kind, d),
           log,
         }, req.signal, undefined, auto.agent);
+        classifier.flush();
         if (!r.ok) {
           send({ error: { message: r.error ?? "agy failed", code: 502 } });
         } else {
@@ -1120,19 +1094,15 @@ async function handleChat(req: Request): Promise<Response> {
       try {
         chunk({ role: "assistant" });
         if (useTools) {
+          const classifier = createNoteClassifier({
+            chunk: (d) => chunk(d),
+            log,
+          });
           const r = await runAgy(
             model,
             prompt,
             {
-              onDelta: (kind, d) => {
-                if (!d) return;
-                log.delta_chars += d.length;
-                if (kind === "agent_response") {
-                  chunk({ content: d });
-                } else {
-                  chunk({ reasoning_content: d });
-                }
-              },
+              onDelta: (kind, d) => classifier.onDelta(kind, d),
               log,
               commit: prepared.commit,
               evict: prepared.evict,
@@ -1140,6 +1110,7 @@ async function handleChat(req: Request): Promise<Response> {
             req.signal,
             prepared.conversationId,
           );
+          classifier.flush();
           if (!r.ok) {
             send({ error: { message: r.error ?? "agy failed", code: 502 } });
           } else {
@@ -1153,20 +1124,17 @@ async function handleChat(req: Request): Promise<Response> {
             }
           }
         } else {
+          const classifier = createNoteClassifier({
+            chunk: (d) => chunk(d),
+            log,
+          });
           const r = await runAgy(model, prompt, {
-            onDelta: (kind, d) => {
-              if (!d) return;
-              log.delta_chars += d.length;
-              if (kind === "agent_response") {
-                chunk({ content: d });
-              } else {
-                chunk({ reasoning_content: d });
-              }
-            },
+            onDelta: (kind, d) => classifier.onDelta(kind, d),
             log,
             commit: prepared.commit,
             evict: prepared.evict,
           }, req.signal, prepared.conversationId);
+          classifier.flush();
           if (!r.ok) {
             send({ error: { message: r.error ?? "agy failed", code: 502 } });
           } else {
