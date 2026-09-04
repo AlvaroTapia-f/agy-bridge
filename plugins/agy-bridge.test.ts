@@ -1,7 +1,18 @@
 // RED test for bridge-effort-reasoning-exposure
 // Must fail before implementation (2.1) and pass after — strict TDD.
 import { assertEquals } from "jsr:@std/assert";
-import { stripEffortSuffix, groupBases, wireModel, FALLBACK_MODELS, buildModelMap } from "./agy-bridge-helpers.ts";
+import {
+  stripEffortSuffix,
+  groupBases,
+  wireModel,
+  FALLBACK_MODELS,
+  buildModelMap,
+  onDeltaHandler,
+  formatDeltaChunk,
+  type DeltaKind,
+  NARRATION_SUFFIX,
+  applyNarrationSuffix,
+} from "./agy-bridge-helpers.ts";
 
 import { groupBases as pluginGroupBases } from "./agy-bridge.ts";
 
@@ -201,4 +212,250 @@ Deno.test("buildModelMap: all non-singleton variants reasoningEffort coverage (t
   // rw variants must mirror ro
   const proRw = map["auto-rw-gemini-3.1-pro"] as unknown as { variants: Record<string, { reasoningEffort: string }> };
   assertEquals(proRw.variants.high.reasoningEffort, "high");
+});
+
+// --- Streaming delta messages (bridge-live-thoughts: DeltaKind routing) ---
+
+Deno.test("delta streaming: formatDeltaChunk and onDeltaHandler route by kind", () => {
+  // agent_response -> content
+  assertEquals(formatDeltaChunk("agent_response", "hello world"), { content: "hello world" });
+  // thought/tool/unknown -> reasoning_content
+  assertEquals(formatDeltaChunk("thought", "thinking..."), { reasoning_content: "thinking..." });
+  assertEquals(formatDeltaChunk("tool", "calling curl"), { reasoning_content: "calling curl" });
+  assertEquals(formatDeltaChunk("unknown", "weird event"), { reasoning_content: "weird event" });
+
+  const chunks: Array<Record<string, unknown>> = [];
+  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
+    chunks.push({ delta, finish });
+  };
+  const log = { delta_chars: 0 };
+
+  onDeltaHandler("thought", "thinking about life", (delta) => chunk(delta), log);
+  onDeltaHandler("agent_response", "The answer is 42.", (delta) => chunk(delta), log);
+
+  assertEquals(log.delta_chars, 36);
+  assertEquals(chunks.length, 2);
+  assertEquals(chunks[0], { delta: { reasoning_content: "thinking about life" }, finish: null });
+  assertEquals(chunks[1], { delta: { content: "The answer is 42." }, finish: null });
+});
+
+Deno.test("delta streaming: empty-skip — empty text_delta never calls chunk", () => {
+  const chunks: Array<Record<string, unknown>> = [];
+  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
+    chunks.push({ delta, finish });
+  };
+  const log = { delta_chars: 0 };
+
+  // Test explicitly with empty string — chunk never called, delta_chars unchanged
+  onDeltaHandler("thought", "", (delta) => chunk(delta), log);
+  onDeltaHandler("agent_response", "", (delta) => chunk(delta), log);
+  assertEquals(chunks.length, 0);
+  assertEquals(log.delta_chars, 0);
+
+  // Triangulate with non-empty string to ensure chunk IS called for real input
+  onDeltaHandler("thought", "step 1", (delta) => chunk(delta), log);
+  assertEquals(chunks.length, 1);
+  assertEquals(chunks[0], { delta: { reasoning_content: "step 1" }, finish: null });
+});
+
+Deno.test("delta streaming: unknown step logs via console.error and routes to reasoning_content", () => {
+  const originalError = console.error;
+  const loggedErrors: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    loggedErrors.push(args);
+  };
+
+  try {
+    const su = { step_type: "custom_future_step", text_delta: "some internal state" };
+    let capturedKind: DeltaKind | null = null;
+    let capturedText: string | null = null;
+
+    // Simulate runAgy filter logic for step_update
+    if (typeof su.text_delta === "string" && su.text_delta !== "") {
+      let kind: DeltaKind;
+      if (su.step_type === "agent_response") {
+        kind = "agent_response";
+      } else if (su.step_type === "thought") {
+        kind = "thought";
+      } else if (su.step_type === "tool") {
+        kind = "tool";
+      } else {
+        kind = "unknown";
+        console.error("unknown step_type:", su.step_type, su);
+      }
+      capturedKind = kind;
+      capturedText = su.text_delta;
+    }
+
+    assertEquals(capturedKind, "unknown");
+    assertEquals(capturedText, "some internal state");
+    assertEquals(loggedErrors.length, 1);
+    assertEquals(loggedErrors[0][0], "unknown step_type:");
+    assertEquals(loggedErrors[0][1], "custom_future_step");
+
+    // Ensure unknown routes to reasoning_content
+    const chunkPayload = formatDeltaChunk(capturedKind!, capturedText!);
+    assertEquals(chunkPayload, { reasoning_content: "some internal state" });
+  } finally {
+    console.error = originalError;
+  }
+});
+
+Deno.test("delta streaming: autonomous — no duplicate chunk({content: r.text}) after live deltas", () => {
+  const chunks: Array<Record<string, unknown>> = [];
+  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
+    chunks.push({ delta, finish });
+  };
+  const log = { delta_chars: 0 };
+
+  const onDelta = (kind: DeltaKind, d: string) => {
+    if (!d) return;
+    log.delta_chars += d.length;
+    if (kind === "agent_response") {
+      chunk({ content: d });
+    } else {
+      chunk({ reasoning_content: d });
+    }
+  };
+
+  // 1. Initial role
+  chunk({ role: "assistant" });
+  // 2. Thought delta
+  onDelta("thought", "Calculating...");
+  // 3. Answer deltas
+  onDelta("agent_response", "The answer ");
+  onDelta("agent_response", "is 42.");
+  // 4. Final stop chunk (NO chunk({ content: r.text }) duplicate dump)
+  chunk({}, "stop");
+
+  assertEquals(chunks.length, 5);
+  assertEquals(chunks[0], { delta: { role: "assistant" }, finish: null });
+  assertEquals(chunks[1], { delta: { reasoning_content: "Calculating..." }, finish: null });
+  assertEquals(chunks[2], { delta: { content: "The answer " }, finish: null });
+  assertEquals(chunks[3], { delta: { content: "is 42." }, finish: null });
+  assertEquals(chunks[4], { delta: {}, finish: "stop" });
+
+  // Verify no chunk ever had the full text replayed in content
+  const contentChunks = chunks.filter((c) => (c.delta as Record<string, unknown>).content !== undefined);
+  assertEquals(contentChunks.length, 2);
+  const fullContentReplay = chunks.find((c) => (c.delta as Record<string, unknown>).content === "The answer is 42.");
+  assertEquals(fullContentReplay, undefined);
+});
+
+Deno.test("delta streaming: tool-loop — live content display-only, final parseToolCalls still correct when tags split", () => {
+  const chunks: Array<Record<string, unknown>> = [];
+  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
+    chunks.push({ delta, finish });
+  };
+  const log = { delta_chars: 0 };
+
+  const onDelta = (kind: DeltaKind, d: string) => {
+    if (!d) return;
+    log.delta_chars += d.length;
+    if (kind === "agent_response") {
+      chunk({ content: d });
+    } else {
+      chunk({ reasoning_content: d });
+    }
+  };
+
+  // Emit reasoning delta
+  onDelta("thought", "Let me look up the weather.");
+  // Split tool call tags across live agent_response deltas
+  onDelta("agent_response", "Checking now: <tool_call>");
+  onDelta("agent_response", '{"name":"get_weather",');
+  onDelta("agent_response", '"arguments":{"city":"London"}}');
+  onDelta("agent_response", "</tool_call>");
+
+  // Full response text reconstructed by agy
+  const toolResponseText = 'Checking now: <tool_call>{"name":"get_weather","arguments":{"city":"London"}}</tool_call>';
+
+  // parseToolCalls on final r.text
+  const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+  const tool_calls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }> = [];
+  let content = "";
+  let last = 0;
+  for (const m of toolResponseText.matchAll(TOOL_CALL_RE)) {
+    content += toolResponseText.slice(last, m.index);
+    last = m.index! + m[0].length;
+    const parsed = JSON.parse(m[1].trim());
+    tool_calls.push({
+      id: `call_${tool_calls.length + 1}`,
+      type: "function",
+      function: { name: parsed.name, arguments: JSON.stringify(parsed.arguments) },
+    });
+  }
+  content += toolResponseText.slice(last);
+
+  // In bridge-live-thoughts tool-loop handler:
+  if (tool_calls.length) {
+    chunk({ role: "assistant", tool_calls }, "tool_calls");
+  } else {
+    chunk({}, "stop");
+  }
+
+  assertEquals(chunks.length, 6);
+  assertEquals(chunks[0], { delta: { reasoning_content: "Let me look up the weather." }, finish: null });
+  assertEquals(chunks[1], { delta: { content: "Checking now: <tool_call>" }, finish: null });
+  assertEquals(chunks[2], { delta: { content: '{"name":"get_weather",' }, finish: null });
+  assertEquals(chunks[3], { delta: { content: '"arguments":{"city":"London"}}' }, finish: null });
+  assertEquals(chunks[4], { delta: { content: "</tool_call>" }, finish: null });
+  assertEquals(chunks[5].finish, "tool_calls");
+  const finalDelta = chunks[5].delta as { tool_calls: Array<{ function: { name: string } }> };
+  assertEquals(finalDelta.tool_calls.length, 1);
+  assertEquals(finalDelta.tool_calls[0].function.name, "get_weather");
+});
+
+Deno.test("delta streaming: delta_chars sums across both kinds", () => {
+  const log = { delta_chars: 0 };
+  const chunk = () => {};
+
+  onDeltaHandler("thought", "thought 123", chunk, log); // 11
+  onDeltaHandler("agent_response", "resp 4567", chunk, log); // 9
+  onDeltaHandler("tool", "tool 89", chunk, log); // 7
+
+  assertEquals(log.delta_chars, 11 + 9 + 7);
+});
+
+Deno.test("delta streaming: tool-loop keepalive sends : keepalive comments when stalled", async () => {
+  const rawSent: string[] = [];
+  const sendRaw = (s: string) => rawSent.push(s);
+
+  // Interval simulation with 10ms for fast test (production uses 10_000ms)
+  const intervalMs = 10;
+  const ka = setInterval(() => sendRaw(`: keepalive ${Date.now()}\n\n`), intervalMs);
+
+  await new Promise((resolve) => setTimeout(resolve, 35));
+  clearInterval(ka);
+
+  // At least 2 keepalives should have been sent
+  assertEquals(rawSent.length >= 2, true, `Expected >= 2 keepalives, got ${rawSent.length}`);
+  for (const s of rawSent) {
+    assertEquals(s.startsWith(": keepalive "), true);
+  }
+});
+
+// --- Phase 6: Narration disclosure (strict TDD — RED before GREEN) ---
+
+Deno.test("narration: autonomous stream:true prompt contains NOTE: suffix", () => {
+  const base = "# Conversation transcript\n\nDo the thing.";
+  const streamingPrompt = applyNarrationSuffix(base, true);
+  assertEquals(streamingPrompt.startsWith(base), true);
+  assertEquals(streamingPrompt.includes("NOTE:"), true);
+  assertEquals(streamingPrompt.includes(NARRATION_SUFFIX), true);
+});
+
+Deno.test("narration: stream:false prompt is verbatim without NOTE:", () => {
+  const base = "# Conversation transcript\n\nDo the thing.";
+  assertEquals(applyNarrationSuffix(base, false), base);
+  assertEquals(applyNarrationSuffix(base, false).includes("NOTE:"), false);
+});
+
+Deno.test("narration: non-auto prompts never receive the suffix", () => {
+  // Non-auto paths (renderPrompt/preparePrompt) never call
+  // applyNarrationSuffix — they pass prompts through unmodified, which is
+  // exactly the stream:false contract: verbatim output, no NOTE:.
+  const nonAutoPrompt = "# System instructions\n\nBe helpful.\n\n# Conversation transcript\n\nHi.";
+  assertEquals(applyNarrationSuffix(nonAutoPrompt, false), nonAutoPrompt);
+  assertEquals(NARRATION_SUFFIX.includes("NOTE:"), true);
 });

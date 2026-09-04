@@ -9,6 +9,7 @@
 *.jsonl
 .local/
 state/
+.codegraph
 
 # Deno & testing
 .deno/

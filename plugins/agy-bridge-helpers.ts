@@ -128,3 +128,40 @@ export function buildModelMap(bases: Map<string, Set<string>>): Record<string, u
   }
   return out
 }
+
+export type DeltaKind = "agent_response" | "thought" | "tool" | "unknown"
+
+export function formatDeltaChunk(
+  kind: DeltaKind,
+  text: string,
+): Record<string, unknown> {
+  return kind === "agent_response"
+    ? { content: text }
+    : { reasoning_content: text }
+}
+
+export function onDeltaHandler(
+  kind: DeltaKind,
+  delta: string,
+  chunk: (payload: Record<string, unknown>) => void,
+  log?: { delta_chars: number },
+): void {
+  if (!delta) return
+  if (log) {
+    log.delta_chars += delta.length
+  }
+  chunk(formatDeltaChunk(kind, delta))
+}
+
+// Narration disclosure (bridge-live-thoughts Phase 6): live test showed the
+// NOTE instruction makes intermediate agent_response deltas emit live.
+// Canonical consumer is handleAutonomousChat's streaming branch in
+// agy-bridge.ts, which inlines the identical literal to stay import-free
+// under the systemd unit's scoped --allow-read. Keep both copies in sync.
+export const NARRATION_SUFFIX =
+  "IMPORTANT: before every tool call, first emit one short line starting with NOTE: explaining what you are about to do and why. Keep each NOTE to one sentence."
+
+export function applyNarrationSuffix(prompt: string, stream: boolean): string {
+  return stream === true ? prompt + NARRATION_SUFFIX : prompt
+}
+
