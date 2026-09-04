@@ -1,10 +1,6 @@
-# model-sync Specification
+# Delta for model-sync
 
-## Purpose
-
-Defines the behavior of the standalone model synchronization script used to dynamically populate `opencode.json` with the current set of available models from the `agy` CLI.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Script Execution and Resolution Chain
 
@@ -65,22 +61,3 @@ Effort variants (e.g. `high`, `medium`, `low`, `thinking`) MUST be derived dynam
 - WHEN `buildModelMap` is called
 - THEN each non-singleton model MUST have flat `interleaved: { field: "reasoning_content" }` at the model level
 - AND MUST NOT contain a nested `capabilities` wrapper
-
-### Requirement: Atomic Configuration Update
-
-The script MUST safely update `opencode.json` without corrupting the file or removing other providers/plugins.
-
-#### Scenario: Preserving existing configuration
-
-- GIVEN `opencode.json` contains other providers (e.g., Anthropic, OpenAI)
-- WHEN `sync-models.ts` updates `provider.agy-bridge.models`
-- THEN it MUST perform a read-modify-write operation specifically on the `agy-bridge` key
-- AND it MUST preserve all other providers and plugins
-- AND it MUST use an atomic temporary-file-and-rename pattern to prevent corruption
-- AND it MUST create a `.bak` backup before modifying
-
-#### Scenario: Dry-run mode
-
-- GIVEN the script is invoked with a dry-run flag
-- WHEN it executes
-- THEN it MUST output the generated JSON model map to stdout without modifying `opencode.json`
