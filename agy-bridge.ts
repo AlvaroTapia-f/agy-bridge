@@ -395,6 +395,14 @@ When finished, your final message must be the complete deliverable requested:
 self-contained and ready to be consumed by an orchestrator without further
 context.`;
 
+// Narration disclosure (bridge-live-thoughts Phase 6): appended to the
+// autonomous prompt ONLY in the streaming branch of handleAutonomousChat so
+// intermediate agent_response deltas narrate tool activity live. Non-auto
+// paths (renderPrompt/preparePrompt) and non-streaming calls never see it.
+// Mirrored in plugins/agy-bridge-helpers.ts for unit tests — keep in sync.
+const NARRATION_SUFFIX =
+  "IMPORTANT: before every tool call, first emit one short line starting with NOTE: explaining what you are about to do and why. Keep each NOTE to one sentence.";
+
 function renderAutonomousPrompt(req: OAIChatRequest): RenderedPrompt {
   const system: string[] = [];
   for (const m of req.messages ?? []) {
@@ -607,8 +615,10 @@ interface AgyResult {
   error?: string;
 }
 
+type DeltaKind = "agent_response" | "thought" | "tool" | "unknown";
+
 interface AgyStreamHandlers {
-  onDelta?: (delta: string) => void;
+  onDelta?: (kind: DeltaKind, text: string) => void;
   log?: Record<string, unknown>;
   commit?: (agyConvId: string) => void;
   evict?: () => void;
@@ -701,8 +711,19 @@ async function runAgy(
         }
         if (ev.event === "step_update") {
           const su = ev.step_update as Record<string, unknown>;
-          if (su.step_type === "agent_response" && typeof su.text_delta === "string") {
-            handlers.onDelta?.(su.text_delta as string);
+          if (typeof su.text_delta === "string" && su.text_delta !== "") {
+            let kind: DeltaKind;
+            if (su.step_type === "agent_response") {
+              kind = "agent_response";
+            } else if (su.step_type === "thought") {
+              kind = "thought";
+            } else if (su.step_type === "tool") {
+              kind = "tool";
+            } else {
+              kind = "unknown";
+              console.error("unknown step_type:", su.step_type, su);
+            }
+            handlers.onDelta?.(kind, su.text_delta);
           }
         } else if (ev.event === "result") {
           const r = ev.result as Record<string, unknown>;
@@ -916,16 +937,22 @@ async function handleAutonomousChat(
       const ka = setInterval(() => sendRaw(`: keepalive ${Date.now()}\n\n`), 10_000);
       try {
         chunk({ role: "assistant" });
-        const r = await runAgy(auto.real, prepared.prompt, {
-          onDelta: (d) => {
+        const streamingPrompt = prepared.prompt + NARRATION_SUFFIX;
+        const r = await runAgy(auto.real, streamingPrompt, {
+          onDelta: (kind, d) => {
+            if (!d) return;
             log.delta_chars += d.length;
+            if (kind === "agent_response") {
+              chunk({ content: d });
+            } else {
+              chunk({ reasoning_content: d });
+            }
           },
           log,
         }, req.signal, undefined, auto.agent);
         if (!r.ok) {
           send({ error: { message: r.error ?? "agy failed", code: 502 } });
         } else {
-          chunk({ content: r.text });
           chunk({}, "stop");
           send({ id, object: "chat.completion.chunk", created, model: modelStr, choices: [], usage: oaiUsage(r.usage) });
         }
@@ -1007,6 +1034,7 @@ async function handleChat(req: Request): Promise<Response> {
     tools_chars: prepared.toolsChars,
     system_chars: prepared.systemChars,
     history_chars: prepared.historyChars,
+    delta_chars: 0,
   };
   const stream = body.stream === true;
   const id = genId();
@@ -1088,31 +1116,53 @@ async function handleChat(req: Request): Promise<Response> {
           choices: [{ index: 0, delta, finish_reason: finish }],
         });
 
+      const ka = setInterval(() => sendRaw(`: keepalive ${Date.now()}\n\n`), 10_000);
       try {
         chunk({ role: "assistant" });
         if (useTools) {
           const r = await runAgy(
             model,
             prompt,
-            { log, commit: prepared.commit, evict: prepared.evict },
+            {
+              onDelta: (kind, d) => {
+                if (!d) return;
+                log.delta_chars += d.length;
+                if (kind === "agent_response") {
+                  chunk({ content: d });
+                } else {
+                  chunk({ reasoning_content: d });
+                }
+              },
+              log,
+              commit: prepared.commit,
+              evict: prepared.evict,
+            },
             req.signal,
             prepared.conversationId,
           );
           if (!r.ok) {
             send({ error: { message: r.error ?? "agy failed", code: 502 } });
           } else {
-            const { content, tool_calls } = parseToolCalls(r.text);
+            const { tool_calls } = parseToolCalls(r.text);
             if (tool_calls.length) {
               chunk({ role: "assistant", tool_calls }, "tool_calls");
               send({ id, object: "chat.completion.chunk", created, model, choices: [], usage: oaiUsage(r.usage) });
             } else {
-              chunk({ role: "assistant", content }, "stop");
+              chunk({}, "stop");
               send({ id, object: "chat.completion.chunk", created, model, choices: [], usage: oaiUsage(r.usage) });
             }
           }
         } else {
           const r = await runAgy(model, prompt, {
-            onDelta: (d) => chunk({ content: d }),
+            onDelta: (kind, d) => {
+              if (!d) return;
+              log.delta_chars += d.length;
+              if (kind === "agent_response") {
+                chunk({ content: d });
+              } else {
+                chunk({ reasoning_content: d });
+              }
+            },
             log,
             commit: prepared.commit,
             evict: prepared.evict,
@@ -1130,6 +1180,7 @@ async function handleChat(req: Request): Promise<Response> {
           send({ error: { message: String(e), code: 500 } });
         } catch { /* controller closed */ }
       } finally {
+        clearInterval(ka);
         sendRaw("data: [DONE]\n\n");
         try {
           controller.close();
