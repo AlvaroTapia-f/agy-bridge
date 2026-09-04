@@ -7,8 +7,8 @@ import {
   wireModel,
   FALLBACK_MODELS,
   buildModelMap,
-  onDeltaHandler,
-  formatDeltaChunk,
+  createNoteClassifier,
+  classifyLine,
   type DeltaKind,
   NARRATION_SUFFIX,
   applyNarrationSuffix,
@@ -172,18 +172,21 @@ Deno.test("buildModelMap: enriched shape — variants.*.reasoningEffort == key",
   assertEquals(gemini.variants.low.reasoningEffort, "low");
 });
 
-Deno.test("buildModelMap: capabilities.reasoning true iff variants non-empty", () => {
+Deno.test("buildModelMap: reasoning true iff variants non-empty", () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
-  const singleton = map["auto-ro-claude-sonnet-4-6"] as unknown as { capabilities?: { reasoning?: boolean }; variants: Record<string, unknown> };
+  const singleton = map["auto-ro-claude-sonnet-4-6"] as unknown as { reasoning?: boolean; capabilities?: unknown; variants: Record<string, unknown> };
   // singleton must NOT advertise reasoning
-  assertEquals(singleton.capabilities?.reasoning, undefined);
+  assertEquals(singleton.reasoning, undefined);
+  assertEquals(singleton.capabilities, undefined);
   assertEquals(Object.keys(singleton.variants).length, 0);
   // non-singletons must advertise reasoning:true
-  const gemini = map["auto-ro-gemini-3.7-flash"] as unknown as { capabilities?: { reasoning?: boolean } };
-  assertEquals(gemini.capabilities?.reasoning, true);
-  const opus = map["auto-ro-claude-opus-4-6"] as unknown as { capabilities?: { reasoning?: boolean }; variants: Record<string, unknown> };
-  assertEquals(opus.capabilities?.reasoning, true);
+  const gemini = map["auto-ro-gemini-3.7-flash"] as unknown as { reasoning?: boolean; capabilities?: unknown };
+  assertEquals(gemini.reasoning, true);
+  assertEquals(gemini.capabilities, undefined);
+  const opus = map["auto-ro-claude-opus-4-6"] as unknown as { reasoning?: boolean; capabilities?: unknown; variants: Record<string, unknown> };
+  assertEquals(opus.reasoning, true);
+  assertEquals(opus.capabilities, undefined);
   assertEquals(Object.keys(opus.variants), ["thinking"]);
 });
 
@@ -197,8 +200,9 @@ Deno.test("buildModelMap: thinking variant enriched", () => {
 Deno.test("buildModelMap: regression — gpt-oss singleton-like medium is selectable", () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
-  const gpt = map["auto-rw-gpt-oss-120b"] as unknown as { capabilities?: { reasoning?: boolean }; variants: Record<string, { reasoningEffort: string }> };
-  assertEquals(gpt.capabilities?.reasoning, true);
+  const gpt = map["auto-rw-gpt-oss-120b"] as unknown as { reasoning?: boolean; capabilities?: unknown; variants: Record<string, { reasoningEffort: string }> };
+  assertEquals(gpt.reasoning, true);
+  assertEquals(gpt.capabilities, undefined);
   assertEquals(gpt.variants.medium.reasoningEffort, "medium");
 });
 
@@ -216,46 +220,41 @@ Deno.test("buildModelMap: all non-singleton variants reasoningEffort coverage (t
 
 // --- Streaming delta messages (bridge-live-thoughts: DeltaKind routing) ---
 
-Deno.test("delta streaming: formatDeltaChunk and onDeltaHandler route by kind", () => {
-  // agent_response -> content
-  assertEquals(formatDeltaChunk("agent_response", "hello world"), { content: "hello world" });
-  // thought/tool/unknown -> reasoning_content
-  assertEquals(formatDeltaChunk("thought", "thinking..."), { reasoning_content: "thinking..." });
-  assertEquals(formatDeltaChunk("tool", "calling curl"), { reasoning_content: "calling curl" });
-  assertEquals(formatDeltaChunk("unknown", "weird event"), { reasoning_content: "weird event" });
-
+Deno.test("delta streaming: createNoteClassifier routes by kind and handles lines", () => {
   const chunks: Array<Record<string, unknown>> = [];
-  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
-    chunks.push({ delta, finish });
-  };
   const log = { delta_chars: 0 };
+  const classifier = createNoteClassifier({
+    chunk: (delta: Record<string, unknown>) => chunks.push(delta),
+    log,
+  });
 
-  onDeltaHandler("thought", "thinking about life", (delta) => chunk(delta), log);
-  onDeltaHandler("agent_response", "The answer is 42.", (delta) => chunk(delta), log);
+  classifier.onDelta("thought", "thinking about life\n");
+  classifier.onDelta("agent_response", "The answer is 42.\n");
 
-  assertEquals(log.delta_chars, 36);
+  assertEquals(log.delta_chars, "thinking about life\n".length + "The answer is 42.\n".length);
   assertEquals(chunks.length, 2);
-  assertEquals(chunks[0], { delta: { reasoning_content: "thinking about life" }, finish: null });
-  assertEquals(chunks[1], { delta: { content: "The answer is 42." }, finish: null });
+  assertEquals(chunks[0], { reasoning_content: "thinking about life\n" });
+  assertEquals(chunks[1], { content: "The answer is 42.\n" });
 });
 
 Deno.test("delta streaming: empty-skip — empty text_delta never calls chunk", () => {
   const chunks: Array<Record<string, unknown>> = [];
-  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
-    chunks.push({ delta, finish });
-  };
   const log = { delta_chars: 0 };
+  const classifier = createNoteClassifier({
+    chunk: (delta: Record<string, unknown>) => chunks.push(delta),
+    log,
+  });
 
   // Test explicitly with empty string — chunk never called, delta_chars unchanged
-  onDeltaHandler("thought", "", (delta) => chunk(delta), log);
-  onDeltaHandler("agent_response", "", (delta) => chunk(delta), log);
+  classifier.onDelta("thought", "");
+  classifier.onDelta("agent_response", "");
   assertEquals(chunks.length, 0);
   assertEquals(log.delta_chars, 0);
 
   // Triangulate with non-empty string to ensure chunk IS called for real input
-  onDeltaHandler("thought", "step 1", (delta) => chunk(delta), log);
+  classifier.onDelta("thought", "step 1");
   assertEquals(chunks.length, 1);
-  assertEquals(chunks[0], { delta: { reasoning_content: "step 1" }, finish: null });
+  assertEquals(chunks[0], { reasoning_content: "step 1" });
 });
 
 Deno.test("delta streaming: unknown step logs via console.error and routes to reasoning_content", () => {
@@ -294,8 +293,13 @@ Deno.test("delta streaming: unknown step logs via console.error and routes to re
     assertEquals(loggedErrors[0][1], "custom_future_step");
 
     // Ensure unknown routes to reasoning_content
-    const chunkPayload = formatDeltaChunk(capturedKind!, capturedText!);
-    assertEquals(chunkPayload, { reasoning_content: "some internal state" });
+    const chunks: Array<Record<string, unknown>> = [];
+    const classifier = createNoteClassifier({
+      chunk: (delta: Record<string, unknown>) => chunks.push(delta),
+    });
+    classifier.onDelta(capturedKind!, capturedText!);
+    assertEquals(chunks.length, 1);
+    assertEquals(chunks[0], { reasoning_content: "some internal state" });
   } finally {
     console.error = originalError;
   }
@@ -408,13 +412,16 @@ Deno.test("delta streaming: tool-loop — live content display-only, final parse
 
 Deno.test("delta streaming: delta_chars sums across both kinds", () => {
   const log = { delta_chars: 0 };
-  const chunk = () => {};
+  const classifier = createNoteClassifier({
+    chunk: () => {},
+    log,
+  });
 
-  onDeltaHandler("thought", "thought 123", chunk, log); // 11
-  onDeltaHandler("agent_response", "resp 4567", chunk, log); // 9
-  onDeltaHandler("tool", "tool 89", chunk, log); // 7
+  classifier.onDelta("thought", "thought 123"); // 11
+  classifier.onDelta("agent_response", "resp 4567\n"); // 10
+  classifier.onDelta("tool", "tool 89"); // 7
 
-  assertEquals(log.delta_chars, 11 + 9 + 7);
+  assertEquals(log.delta_chars, 11 + 10 + 7);
 });
 
 Deno.test("delta streaming: tool-loop keepalive sends : keepalive comments when stalled", async () => {
@@ -458,4 +465,191 @@ Deno.test("narration: non-auto prompts never receive the suffix", () => {
   const nonAutoPrompt = "# System instructions\n\nBe helpful.\n\n# Conversation transcript\n\nHi.";
   assertEquals(applyNarrationSuffix(nonAutoPrompt, false), nonAutoPrompt);
   assertEquals(NARRATION_SUFFIX.includes("NOTE:"), true);
+});
+
+// --- Phase 1: Classifier helper (strict TDD — RED before GREEN) ---
+
+Deno.test("1.1 RED test: NOTE line split across deltas → reasoning_content", () => {
+  const chunks: Array<Record<string, unknown>> = [];
+  const classifier = createNoteClassifier({
+    chunk: (delta: Record<string, unknown>) => chunks.push(delta),
+  });
+
+  // Emitting a NOTE: line in chunks
+  classifier.onDelta("agent_response", "NO");
+  classifier.onDelta("agent_response", "TE: Checking");
+  classifier.onDelta("agent_response", " the file status.\n");
+
+  assertEquals(chunks.length, 1);
+  assertEquals(chunks[0], { reasoning_content: "NOTE: Checking the file status.\n" });
+});
+
+Deno.test("1.2 RED test: NOTE→reasoning then answer→content; turn-end flush() residual→content", () => {
+  const chunks: Array<Record<string, unknown>> = [];
+  const classifier = createNoteClassifier({
+    chunk: (delta: Record<string, unknown>) => chunks.push(delta),
+  });
+
+  // 1. NOTE line completes
+  classifier.onDelta("agent_response", "NOTE: Running verification.\n");
+  // 2. Direct answer line completes
+  classifier.onDelta("agent_response", "All tests passed successfully.\n");
+  // 3. Trailing residual without trailing newline
+  classifier.onDelta("agent_response", "Done.");
+
+  assertEquals(chunks.length, 2);
+  assertEquals(chunks[0], { reasoning_content: "NOTE: Running verification.\n" });
+  assertEquals(chunks[1], { content: "All tests passed successfully.\n" });
+
+  // 4. flush() at turn end
+  classifier.flush();
+  assertEquals(chunks.length, 3);
+  assertEquals(chunks[2], { content: "Done." });
+});
+
+Deno.test("1.3 RED test: identical chunk sequence via shared classifier across all paths", () => {
+  const runSequence = () => {
+    const chunks: Array<Record<string, unknown>> = [];
+    const classifier = createNoteClassifier({
+      chunk: (delta: Record<string, unknown>) => chunks.push(delta),
+    });
+    classifier.onDelta("thought", "internal thought ");
+    classifier.onDelta("thought", "continued\n");
+    classifier.onDelta("tool", "calling grep\n");
+    classifier.onDelta("agent_response", "NOTE: step 1\n");
+    classifier.onDelta("agent_response", "Hello ");
+    classifier.onDelta("agent_response", "world.");
+    classifier.flush();
+    return chunks;
+  };
+
+  const path1 = runSequence();
+  const path2 = runSequence();
+  const path3 = runSequence();
+
+  assertEquals(path1, path2);
+  assertEquals(path2, path3);
+  assertEquals(path1.length, 5);
+  assertEquals(path1[0], { reasoning_content: "internal thought " });
+  assertEquals(path1[1], { reasoning_content: "continued\n" });
+  assertEquals(path1[2], { reasoning_content: "calling grep\n" });
+  assertEquals(path1[3], { reasoning_content: "NOTE: step 1\n" });
+  assertEquals(path1[4], { content: "Hello world." });
+});
+
+Deno.test("1.4 classifyLine pure function: identifies NOTE: prefix and whitespace variations", () => {
+  assertEquals(classifyLine("NOTE: hello\n"), "reasoning_content");
+  assertEquals(classifyLine("   NOTE: indented note\n"), "reasoning_content");
+  assertEquals(classifyLine("Not a note\n"), "content");
+  assertEquals(classifyLine("NOTEworthy text\n"), "content");
+  assertEquals(classifyLine("Here is the answer.\n"), "content");
+});
+
+Deno.test("1.4 triangulation: empty deltas skipped, delta_chars tracked, unknown step logged", () => {
+  const chunks: Array<Record<string, unknown>> = [];
+  const log = { delta_chars: 0 };
+  const classifier = createNoteClassifier({
+    chunk: (delta: Record<string, unknown>) => chunks.push(delta),
+    log,
+  });
+
+  const origError = console.error;
+  let logged = false;
+  console.error = () => { logged = true; };
+  try {
+    classifier.onDelta("agent_response", "");
+    classifier.onDelta("thought", "");
+    assertEquals(chunks.length, 0);
+    assertEquals(log.delta_chars, 0);
+
+    // Triangulate leading whitespace on NOTE:
+    classifier.onDelta("agent_response", "   NOTE: indented note line\n");
+    assertEquals(chunks.length, 1);
+    assertEquals(chunks[0], { reasoning_content: "   NOTE: indented note line\n" });
+
+    // Triangulate unknown kind
+    classifier.onDelta("unknown", "mystery delta");
+    assertEquals(logged, true);
+    assertEquals(chunks.length, 2);
+    assertEquals(chunks[1], { reasoning_content: "mystery delta" });
+    assertEquals(log.delta_chars > 0, true);
+  } finally {
+    console.error = origError;
+  }
+});
+
+Deno.test("1.5 RED test: buildModelMap emits flat interleaved and reasoning: true, no nested capabilities", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+
+  // Check non-singleton: auto-ro-gemini-3.7-flash
+  const flash = map["auto-ro-gemini-3.7-flash"] as Record<string, unknown>;
+  assertEquals(flash.reasoning, true);
+  assertEquals(flash.interleaved, { field: "reasoning_content" });
+  assertEquals(flash.capabilities, undefined);
+
+  // Check singleton: auto-ro-claude-sonnet-4-6
+  const sonnet = map["auto-ro-claude-sonnet-4-6"] as Record<string, unknown>;
+  assertEquals(sonnet.reasoning, undefined);
+  assertEquals(sonnet.interleaved, undefined);
+  assertEquals(sonnet.capabilities, undefined);
+});
+
+Deno.test("2.1 RED test: autonomous path routes via shared classifier with NOTE and flush", () => {
+  const chunks: Array<Record<string, unknown>> = [];
+  const chunk = (delta: Record<string, unknown>, finish: string | null = null) => {
+    chunks.push({ delta, finish });
+  };
+  const log = { delta_chars: 0 };
+  const classifier = createNoteClassifier({
+    chunk: (d) => chunk(d),
+    log,
+  });
+
+  // 1. Initial role
+  chunk({ role: "assistant" });
+  // 2. Thought delta
+  classifier.onDelta("thought", "Analyzing problem...");
+  // 3. NOTE narration
+  classifier.onDelta("agent_response", "NOTE: Searching for definitions.\n");
+  // 4. Final answer text (without newline)
+  classifier.onDelta("agent_response", "Here is the result.");
+  // 5. Stream finalization: flush then stop
+  classifier.flush();
+  chunk({}, "stop");
+
+  assertEquals(chunks.length, 5);
+  assertEquals(chunks[0], { delta: { role: "assistant" }, finish: null });
+  assertEquals(chunks[1], { delta: { reasoning_content: "Analyzing problem..." }, finish: null });
+  assertEquals(chunks[2], { delta: { reasoning_content: "NOTE: Searching for definitions.\n" }, finish: null });
+  assertEquals(chunks[3], { delta: { content: "Here is the result." }, finish: null });
+  assertEquals(chunks[4], { delta: {}, finish: "stop" });
+  assertEquals(log.delta_chars > 0, true);
+});
+
+Deno.test("3.2 RED parity: drift-guard test — plugin groupBases == helpers groupBases on same input", () => {
+  const testInputs = [
+    FALLBACK_MODELS,
+    [
+      "gemini-3.7-flash-high",
+      "gemini-3.7-flash-low",
+      "claude-sonnet-4-6",
+      "gpt-oss-120b-medium",
+      "gemini-3.8-flash-ultra",
+      "gemini-3.9-pro-max",
+      "gemini-3.9-pro-ultra",
+      "standalone-model",
+    ],
+  ];
+
+  for (const input of testInputs) {
+    const fromPlugin = pluginGroupBases(input);
+    const fromHelpers = groupBases(input);
+
+    assertEquals(fromPlugin.size, fromHelpers.size);
+    for (const [base, variants] of fromHelpers.entries()) {
+      assertEquals(fromPlugin.has(base), true, `Plugin missing base: ${base}`);
+      assertEquals(fromPlugin.get(base), variants, `Mismatch for base: ${base}`);
+    }
+  }
 });

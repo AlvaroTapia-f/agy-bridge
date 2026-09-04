@@ -121,7 +121,12 @@ export function buildModelMap(bases: Map<string, Set<string>>): Record<string, u
         id,
         name: id,
         provider: { id: "agy-bridge", name: "AGY Bridge" },
-        ...(variants.size ? { capabilities: { reasoning: true as const } } : {}),
+        ...(variants.size
+          ? {
+              reasoning: true as const,
+              interleaved: { field: "reasoning_content" as const },
+            }
+          : {}),
         variants: variantMap,
       }
     }
@@ -131,33 +136,64 @@ export function buildModelMap(bases: Map<string, Set<string>>): Record<string, u
 
 export type DeltaKind = "agent_response" | "thought" | "tool" | "unknown"
 
-export function formatDeltaChunk(
-  kind: DeltaKind,
-  text: string,
-): Record<string, unknown> {
-  return kind === "agent_response"
-    ? { content: text }
-    : { reasoning_content: text }
+export type NoteClassifierOptions = {
+  chunk: (delta: Record<string, unknown>) => void
+  log?: { delta_chars: number }
 }
 
-export function onDeltaHandler(
-  kind: DeltaKind,
-  delta: string,
-  chunk: (payload: Record<string, unknown>) => void,
-  log?: { delta_chars: number },
-): void {
-  if (!delta) return
-  if (log) {
-    log.delta_chars += delta.length
+export function classifyLine(line: string): "reasoning_content" | "content" {
+  return line.trimStart().startsWith("NOTE:") ? "reasoning_content" : "content"
+}
+
+export function createNoteClassifier(opts: NoteClassifierOptions): {
+  onDelta(kind: DeltaKind, text: string): void
+  flush(): void
+} {
+  let buffer = ""
+
+  return {
+    onDelta(kind: DeltaKind, text: string): void {
+      if (!text) return
+      if (opts.log) {
+        opts.log.delta_chars += text.length
+      }
+
+      if (kind === "unknown") {
+        console.error("unknown step_type:", kind, text)
+        opts.chunk({ reasoning_content: text })
+        return
+      }
+
+      if (kind === "thought" || kind === "tool") {
+        opts.chunk({ reasoning_content: text })
+        return
+      }
+
+      // kind === "agent_response" -> line buffered
+      buffer += text
+      let newlineIdx = buffer.indexOf("\n")
+      while (newlineIdx !== -1) {
+        const line = buffer.slice(0, newlineIdx + 1)
+        buffer = buffer.slice(newlineIdx + 1)
+        const field = classifyLine(line)
+        opts.chunk({ [field]: line })
+        newlineIdx = buffer.indexOf("\n")
+      }
+    },
+
+    flush(): void {
+      if (buffer.length > 0) {
+        opts.chunk({ content: buffer })
+        buffer = ""
+      }
+    },
   }
-  chunk(formatDeltaChunk(kind, delta))
 }
 
 // Narration disclosure (bridge-live-thoughts Phase 6): live test showed the
 // NOTE instruction makes intermediate agent_response deltas emit live.
 // Canonical consumer is handleAutonomousChat's streaming branch in
-// agy-bridge.ts, which inlines the identical literal to stay import-free
-// under the systemd unit's scoped --allow-read. Keep both copies in sync.
+// agy-bridge.ts, which statically imports this constant as the single source of truth.
 export const NARRATION_SUFFIX =
   "IMPORTANT: before every tool call, first emit one short line starting with NOTE: explaining what you are about to do and why. Keep each NOTE to one sentence."
 
