@@ -1,0 +1,61 @@
+# Archive Report: sanitizar-repo
+
+**Change**: `sanitizar-repo`
+**Archive date**: 2026-09-07
+**Artifact store mode**: `openspec`
+**Verdict**: PASS WITH WARNINGS (0 critical)
+
+## Final State at Close
+
+- Verify rev3 (post apply-progress): PASS WITH WARNINGS, 0 critical
+- Full suite: 80 deno tests, 21 installer tests, smoke PASS, check/lint clean, bundle regen byte-identical
+- Create-only fmt gate green (4 created files fmt-clean; modified-file regressions vs HEAD empty)
+- All 25/25 tasks checked in `tasks.md`
+- Owner-confirmed: sync failure exits 1; create-only fmt gate; stacked-to-main chained delivery pending (6 PRs, uncommitted worktree)
+
+## Specs Synced
+
+| Domain | Action | Details |
+|--------|--------|---------|
+| `install-automation` | Updated | MODIFIED "Install Automation — Global Provider Docs": replaced Python fallback generator with hard Deno prerequisite (`command -v deno` + `deno --version`, exit 1 before any sync). Removed Python 4-pass generator clause. Added explicit "MUST NOT attempt any Python-based fallback" to Missing Deno scenario. |
+| `model-sync` | Updated | MODIFIED "Dynamic Effort Capture": replaced "across both Deno and Python implementations" with "implemented solely in Deno (`plugins/agy-bridge-helpers.ts`)". Added `capabilities === undefined` requirement. Removed Python parity clause. |
+| `opencode-provider` | Updated + W1 fix | MODIFIED "Auto-Prefixed Model Enumeration": replaced self-contained 4-pass logic with generated bundle from `agy-bridge-helpers.ts`, added smoke test requirement. MODIFIED "Reasoning Model Shape Conformance": replaced nested `capabilities: { reasoning: true }` with flat `reasoning: true` + `capabilities === undefined`. ADDED "Bundle-based plugin execution" scenario, removed "Self-contained plugin execution" + "Drift-guard parity" scenarios. W1 fix: also updated non-delta blocks — "Effort Variants" (scenarios at L62/L68: changed `capabilities.reasoning: true` GIVEN to flat `reasoning: true` with `capabilities === undefined`), "Stale Model Migration" (replaced nested `capabilities.reasoning` with flat `reasoning: true` / `capabilities === undefined`), "Reasoning Effort Test Coverage" (replaced enriched shape assertions with flat shape assertions). |
+| `plugin-packaging` | Created | Delta spec was a full spec (no delta sections). Copied mechanically to `openspec/specs/plugin-packaging/spec.md`. Contains: Bundle Generation, Installed-Plugin Smoke Test, Parity Check in Test Suite requirements. |
+| `repo-hygiene` | Updated + ADDED | ADDED "Scoped Lint and Format Gate" requirement (archive exclusion, create-only fmt gate with no-regressions clause). MODIFIED "Documentation Accuracy": expanded scope to include installer behavior descriptions and removed Python fallback references. |
+
+## W1 Resolution (Residual at Verify, Fixed at Archive)
+
+`openspec/specs/opencode-provider/spec.md` carried nested `capabilities.reasoning` wording in requirements OUTSIDE the delta's MODIFIED blocks ("Effort Variants", "Stale Model Migration", "Reasoning Effort Test Coverage"). All such references were updated to flat `reasoning: true` with `capabilities === undefined` at archive time. The main spec now consistently uses the flat shape throughout — no internal contradiction baked in.
+
+## Warnings Carried
+
+- **W2 (residual)**: `scripts/sync-models.ts:150` token `!== undefined` semantics change — no prod caller affected; recorded as known follow-up.
+- **W4 (carried)**: fmt scenario self-reference (verify-report.md in diff-filter=A set) — wording tightened at archive.
+- **Slice-6 tests/service.test.ts (471 lines)** ships under `size:exception` with owner knowledge; code never compressed for budget.
+- **Issue #7** (owner-filed post-verify): static `opencode.json` models shadow live plugin listing, no freshness mechanism.
+
+## Archive Contents
+
+- proposal.md ✅
+- specs/ (5 domains) ✅
+- design.md ✅
+- tasks.md ✅ (25/25 tasks complete)
+- apply-progress.md ✅
+- verify-report.md ✅ (rev3, PASS WITH WARNINGS, 9/9 req, 25/25 scenarios)
+- verify-report.r1.md ✅
+- verify-report.r2.md ✅
+- exploration.md ✅
+- research.md ✅
+
+## Source of Truth Updated
+
+The following main specs now reflect the new behavior:
+- `openspec/specs/install-automation/spec.md`
+- `openspec/specs/model-sync/spec.md`
+- `openspec/specs/opencode-provider/spec.md`
+- `openspec/specs/plugin-packaging/spec.md` (new)
+- `openspec/specs/repo-hygiene/spec.md`
+
+## SDD Cycle Complete
+
+The change has been fully planned, implemented, verified, and archived. Ready for the next change.

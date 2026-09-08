@@ -28,7 +28,8 @@ The synchronization script (`scripts/sync-models.ts`) MUST resolve available mod
 
 ### Requirement: Dynamic Effort Capture
 
-Effort variants (e.g. `high`, `medium`, `low`, `thinking`) MUST be derived dynamically from the slugs actually exposed by `agy` at sync time, not from a static hardcoded list. The behavior MUST remain identical to the current hardcoded flow for existing models, and the internal fallback list MUST maintain parity (17 slugs, 8 bases) across both Deno and Python implementations using a 4-pass algorithm. `buildModelMap` MUST emit flat `interleaved: { field: "reasoning_content" }` for every model with non-empty `variants`, in addition to flat `reasoning: true`. The nested `capabilities: { reasoning, interleaved }` form is inert in the OpenCode config schema and MUST NOT be emitted.
+Effort variants (e.g. `high`, `medium`, `low`, `thinking`) MUST be derived dynamically from the slugs actually exposed by `agy` at sync time, not from a static hardcoded list. The behavior MUST remain identical to the current hardcoded flow for existing models, and the internal fallback list MUST maintain parity (14 slugs, 7 bases, verified live 2026-09-07) using a 4-pass algorithm implemented solely in Deno (`plugins/agy-bridge-helpers.ts`). There MUST NOT be a Python implementation of the grouping logic. `buildModelMap` MUST emit flat `interleaved: { field: "reasoning_content" }` for every model with non-empty `variants`, in addition to flat `reasoning: true`. The nested `capabilities: { reasoning, interleaved }` form is inert in the OpenCode config schema and MUST NOT be emitted.
+(Previously: required parity across both Deno and Python implementations using a 4-pass algorithm.)
 
 #### Scenario: Efforts inferred from live TSV
 
@@ -48,7 +49,7 @@ Effort variants (e.g. `high`, `medium`, `low`, `thinking`) MUST be derived dynam
 
 - GIVEN offline fallback uses `FALLBACK_MODELS` (which encodes known suffixes)
 - WHEN `groupBases(FALLBACK_MODELS)` is used
-- THEN it MUST produce the 8 bases and variant sets as today (e.g. `gemini-3.8-flash -> {high,medium,low}`, `claude-sonnet-4-6 -> {}` singleton) covering 17 slugs
+- THEN it MUST produce the 7 bases and variant sets as today (e.g. `gemini-3.8-flash -> {high,medium,low}`, `claude-sonnet-4-6 -> {}` singleton) covering 14 slugs
 - AND the live dynamic path MUST be behaviorally equivalent for those inputs
 
 #### Scenario: Offline Fallback (Idempotency and Non-Blocking)

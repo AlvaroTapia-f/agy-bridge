@@ -66,12 +66,12 @@ find_binary() {
   echo "$found"
 }
 
-DENO_BIN="$(find_binary deno "$HOME/.deno/bin/deno" "/usr/bin/deno" "/usr/local/bin/deno" "/usr/sbin/deno")"
-if [[ -z "$DENO_BIN" ]]; then
-  echo "Error: 'deno' binary not found in PATH or standard locations." >&2
+if ! command -v deno >/dev/null 2>&1 || ! deno --version >/dev/null 2>&1; then
+  echo "Error: 'deno' binary not found in PATH or 'deno --version' failed." >&2
   echo "Please install Deno: https://deno.land" >&2
   exit 1
 fi
+DENO_BIN="$(command -v deno)"
 echo "  [✓] Deno binary detected: $DENO_BIN"
 
 AGY_BIN="$(find_binary agy "$HOME/.local/bin/agy" "/usr/bin/agy" "/usr/local/bin/agy" "/usr/sbin/agy")"
@@ -171,9 +171,7 @@ fi
 # 5. Configure opencode provider (global only)
 OPENCODE_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
 PLUGIN_SRC="$SCRIPT_DIR/plugins/agy-bridge.ts"
-PLUGIN_HELPERS_SRC="$SCRIPT_DIR/plugins/agy-bridge-helpers.ts"
 PLUGIN_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge.ts"
-PLUGIN_HELPERS_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge-helpers.ts"
 if [[ -f "$PLUGIN_SRC" ]]; then
   mkdir -p "$(dirname "$PLUGIN_DEST")"
   if [[ ! -f "$PLUGIN_DEST" ]] || ! cmp -s "$PLUGIN_SRC" "$PLUGIN_DEST"; then
@@ -253,11 +251,10 @@ PYEOF
     echo "  [i] python3 not found — skipping opencode provider base setup"
   fi
 
-  # Synchronize models: Deno-first with scripts/sync-models.ts, Python fallback if Deno fails
-  SYNCED=false
-  if [[ -n "${DENO_BIN:-}" && -x "$DENO_BIN" && -f "$SCRIPT_DIR/scripts/sync-models.ts" ]]; then
+  # Synchronize models: Deno scripts/sync-models.ts (hard requirement, fails on error)
+  if [[ -f "$SCRIPT_DIR/scripts/sync-models.ts" ]]; then
     echo "  [+] Synchronizing models via Deno..."
-    if "$DENO_BIN" run \
+    if ! "$DENO_BIN" run \
       --allow-run="${AGY_BIN:-agy},agy" \
       --allow-net=127.0.0.1:7421 \
       --allow-read \
@@ -266,108 +263,12 @@ PYEOF
       "$SCRIPT_DIR/scripts/sync-models.ts" \
       --config-path "$OPENCODE_CONFIG" \
       ${AGY_BIN:+--agy-bin "$AGY_BIN"}; then
-      SYNCED=true
-    else
-      echo "  [!] Deno model sync failed; attempting Python fallback" >&2
+      echo "Error: Deno model sync failed." >&2
+      exit 1
     fi
-  fi
-
-  if [[ "$SYNCED" != true ]]; then
-    if command -v python3 >/dev/null 2>&1; then
-      python3 - "$OPENCODE_CONFIG" << 'PYEOF'
-import json, sys
-config_path = sys.argv[1]
-try:
-    with open(config_path, 'r') as f:
-        data = json.load(f)
-    if "provider" not in data or "agy-bridge" not in data["provider"]:
-        sys.exit(0)
-    # LOCKSTEP:plugin-4pass-live
-    fallback = [
-      "gemini-3.7-flash-high","gemini-3.7-flash-medium","gemini-3.7-flash-low",
-      "gemini-3.6-flash-high","gemini-3.6-flash-medium","gemini-3.6-flash-low",
-      "gemini-3.5-flash-high","gemini-3.5-flash-medium","gemini-3.5-flash-low",
-      "gemini-3.1-pro-high","gemini-3.1-pro-low",
-      "claude-sonnet-4-6","claude-opus-4-6-thinking","gpt-oss-120b-medium",
-      "gemini-3.8-flash-high","gemini-3.8-flash-medium","gemini-3.8-flash-low",
-    ]
-    suffixes = ["high","medium","low","thinking"]
-    def strip(s):
-        for suf in suffixes:
-            if s.endswith(f"-{suf}"):
-                return s[:-len(f"-{suf}")], suf
-        return s, None
-    from collections import defaultdict
-    import re
-    grouped = defaultdict(set)
-    unassigned = []
-    # Pass 1: standard known effort suffixes
-    for s in fallback:
-        base, var = strip(s)
-        if var:
-            grouped[base].add(var)
-        else:
-            unassigned.append(s)
-
-    # Pass 2: match unassigned against known bases
-    remaining = []
-    for s in unassigned:
-        matched = False
-        for known_base in list(grouped.keys()):
-            if s.startswith(f"{known_base}-"):
-                var = s[len(known_base) + 1:]
-                if var and "/" not in var:
-                    grouped[known_base].add(var)
-                    matched = True
-                    break
-        if not matched:
-            remaining.append(s)
-
-    # Pass 3: detect new multi-variant bases sharing prefix before last '-'
-    prefix_map = defaultdict(list)
-    for s in remaining:
-        last_dash = s.rfind("-")
-        if last_dash > 0:
-            base_candidate = s[:last_dash]
-            var_candidate = s[last_dash + 1:]
-            if re.match(r"^[a-zA-Z]+$", var_candidate):
-                prefix_map[base_candidate].append(s)
-
-    final_remaining = set(remaining)
-    for base_candidate, group in prefix_map.items():
-        if len(group) > 1:
-            for s in group:
-                var = s[len(base_candidate) + 1:]
-                grouped[base_candidate].add(var)
-                final_remaining.discard(s)
-
-    # Pass 4: singletons
-    for s in final_remaining:
-        if s not in grouped:
-            grouped[s] = set()
-
-    models = {}
-    for base, vars in grouped.items():
-        for profile in ["ro","rw"]:
-            id_ = f"auto-{profile}-{base}"
-            vmap = {v: {"reasoningEffort": v} for v in sorted(vars)}
-            entry = {"name": id_, "variants": vmap}
-            if vars:
-                entry["capabilities"] = {"reasoning": True}
-            models[id_] = entry
-    existing = data["provider"]["agy-bridge"].get("models")
-    if not existing or len(existing) < 16:
-        data["provider"]["agy-bridge"]["models"] = models
-        with open(config_path, 'w') as f:
-            json.dump(data, f, indent=2)
-            f.write("\n")
-        print(f"  [✓] Generated {len(models)} fallback models via Python")
-except Exception as e:
-    print(f"  [!] Fallback model generation failed: {e}", file=sys.stderr)
-PYEOF
-    else
-      echo "  [!] Neither Deno nor python3 could synchronize models" >&2
-    fi
+  else
+    echo "Error: Model sync script not found at $SCRIPT_DIR/scripts/sync-models.ts" >&2
+    exit 1
   fi
 
   if [[ "$WITH_AUTH" != true ]]; then

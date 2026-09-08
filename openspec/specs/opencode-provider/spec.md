@@ -24,7 +24,8 @@ The system MUST register `agy-bridge` in `~/.config/opencode/opencode.json` (glo
 
 ### Requirement: Auto-Prefixed Model Enumeration
 
-The system MUST expose ONLY `auto-ro-<slug>` and `auto-rw-<slug>` per base `<slug>` derived from `agy models` TSV or `FALLBACK_MODELS`. Bare slugs MUST NOT be exposed. The plugin's provider hook (`resolveSlugs` → `groupBases` → `buildModelMap`) MUST fetch live ids and fall back to `FALLBACK_MODELS` when the bridge is unreachable. The `groupBases` logic MUST be mirrored internally in the plugin (self-contained 4-pass logic) to avoid import failures, and the fallback MUST cover 17 distinct slugs across 8 bases (yielding 16 grouped ids: 8 distinct bases × 2 profiles). A drift-guard test MUST assert that the plugin-embedded grouping produces output identical to the shared `groupBases` helper on the same input.
+The system MUST expose ONLY `auto-ro-<slug>` and `auto-rw-<slug>` per base `<slug>` derived from `agy models` TSV or `FALLBACK_MODELS`. Bare slugs MUST NOT be exposed. The plugin's provider hook (`resolveSlugs` → `groupBases` → `buildModelMap`) MUST fetch live ids and fall back to `FALLBACK_MODELS` when the bridge is unreachable. The plugin MUST be a generated self-contained bundle (see `plugin-packaging` spec) produced from `plugins/agy-bridge-helpers.ts` as the single source of truth for catalog, grouping, and model-map logic. The fallback MUST cover 14 distinct slugs across 7 bases (yielding 14 grouped ids: 7 distinct bases × 2 profiles), matching the live `GET /v1/models` catalog verified 2026-09-07 after upstream retired `gemini-3.5-flash`. An installed-plugin smoke test MUST verify the bundle loads and produces correct output.
+(Previously: the plugin embedded its own mirrored 4-pass grouping logic with a drift-guard test asserting parity against the helpers.)
 
 #### Scenario: Live enumeration
 
@@ -36,23 +37,18 @@ The system MUST expose ONLY `auto-ro-<slug>` and `auto-rw-<slug>` per base `<slu
 
 - GIVEN the bridge is unreachable
 - WHEN falling back to `FALLBACK_MODELS`
-- THEN the system MUST generate 16 grouped ids (8 distinct bases × 2 profiles: `auto-ro/*` + `auto-rw/*`) using the self-contained 4-pass grouping logic. Grouping strips `{-high,-medium,-low,-thinking}` to deduplicate bases; singleton bases yield `variants: {}`.
+- THEN the system MUST generate 14 grouped ids (7 distinct bases × 2 profiles: `auto-ro/*` + `auto-rw/*`) using the bundle's grouping logic (sourced from `agy-bridge-helpers.ts`). Grouping strips `{-high,-medium,-low,-thinking}` to deduplicate bases; singleton bases yield `variants: {}`.
 
-#### Scenario: Self-contained plugin execution
+#### Scenario: Bundle-based plugin execution
 
-- GIVEN the `plugins/agy-bridge.ts` plugin is loaded in a sandboxed environment
+- GIVEN the `plugins/agy-bridge.ts` plugin is a generated self-contained bundle loaded in a sandboxed environment
 - WHEN the plugin hook executes offline
-- THEN it MUST NOT fail due to missing `helpers` imports and MUST successfully group the 17 fallback models into 8 bases using its own embedded 4-pass logic
-
-#### Scenario: Drift-guard parity
-
-- GIVEN `FALLBACK_MODELS` as input to both the shared `groupBases` and the plugin-embedded grouping
-- WHEN `deno test` runs the drift-guard test
-- THEN both MUST produce identical base-to-variant maps
+- THEN it MUST NOT fail due to missing imports and MUST successfully group the 14 fallback models into 7 bases using the bundled logic
+- AND the bundle output MUST be identical to the helpers source output (verified by parity test in `plugin-packaging`)
 
 ### Requirement: Effort Variants
 
-Each model MUST expose a `variants` map for effort. When `variants` is non-empty the model MUST set `capabilities.reasoning` to `true` and each entry MUST be `{ reasoningEffort: "<k>" }` where `<k>` equals the variant key (e.g. `high` → `{ reasoningEffort: "high" }`). Singleton models with `variants: {}` (e.g. `claude-sonnet-4-6`) MUST NOT advertise `capabilities.reasoning`. Variants remain ONLY the effort UX; no flat `-high` model ids SHALL be exposed.
+Each model MUST expose a `variants` map for effort. When `variants` is non-empty the model MUST set flat `reasoning: true` (with `capabilities === undefined`) and each entry MUST be `{ reasoningEffort: "<k>" }` where `<k>` equals the variant key (e.g. `high` → `{ reasoningEffort: "high" }`). Singleton models with `variants: {}` (e.g. `claude-sonnet-4-6`) MUST NOT advertise `capabilities.reasoning`. Variants remain ONLY the effort UX; no flat `-high` model ids SHALL be exposed.
 (Previously: variants were `{ high: {} }` with no `capabilities` or `reasoningEffort`.)
 
 #### Scenario: Picker
@@ -63,31 +59,33 @@ Each model MUST expose a `variants` map for effort. When `variants` is non-empty
 
 #### Scenario: Editing effort on supported model is selectable
 
-- GIVEN `agy-bridge/auto-rw-gemini-3.7-flash` has `capabilities.reasoning: true` and `variants: { high: { reasoningEffort: "high" }, medium: { reasoningEffort: "medium" }, low: { reasoningEffort: "low" } }`
+- GIVEN `agy-bridge/auto-rw-gemini-3.7-flash` has flat `reasoning: true` and `variants: { high: { reasoningEffort: "high" }, medium: { reasoningEffort: "medium" }, low: { reasoningEffort: "low" } }` (with `capabilities === undefined`)
 - WHEN the SDD TUI evaluates `listReasoningEffortsFromModel` / `buildReasoningEditState`
 - THEN it MUST return `kind: "selectable"` with `options: ["high","low","medium"]` and MUST NOT show `does not expose reasoning effort options`
 
 #### Scenario: Editing effort on singleton is unsupported
 
-- GIVEN `agy-bridge/auto-ro-claude-sonnet-4-6` has `variants: {}` and no `capabilities.reasoning`
+- GIVEN `agy-bridge/auto-ro-claude-sonnet-4-6` has `variants: {}` and flat `reasoning: true` with `capabilities === undefined`
 - WHEN the SDD TUI evaluates `buildReasoningEditState` for that model
 - THEN it MUST return `kind: "unsupported"` with `Model agy-bridge/auto-ro-claude-sonnet-4-6 does not expose reasoning effort options`
 
 ### Requirement: Reasoning Model Shape Conformance
 
-Generated models via `buildModelMap` (`plugins/agy-bridge-helpers.ts`) and the `sync-models.ts` script MUST conform identically to Effort Variants. Both MUST set `capabilities: { reasoning: true }` iff `variants` non-empty and MUST emit `variants.<k> = { reasoningEffort: k }`.
+Generated models via `buildModelMap` (`plugins/agy-bridge-helpers.ts`) and the `sync-models.ts` script MUST conform identically to Effort Variants. Both MUST emit flat `reasoning: true` at the model level (with `capabilities === undefined`) iff `variants` is non-empty, and MUST emit `variants.<k> = { reasoningEffort: k }`. The nested `capabilities: { reasoning, interleaved }` form is inert in the OpenCode config schema and MUST NOT be emitted.
+(Previously: required the nested `capabilities: { reasoning: true }` form, which the code never emitted and the schema does not accept.)
 
-#### Scenario: buildModelMap emits enriched shape
+#### Scenario: buildModelMap emits flat shape
 
 - GIVEN `groupBases(FALLBACK_MODELS)` yields 7 bases
 - WHEN `buildModelMap` is called
-- THEN each non-singleton (e.g. `auto-ro-gemini-3.7-flash`) MUST have `capabilities.reasoning === true` and `variants.high.reasoningEffort === "high"`, and singleton `auto-ro-claude-sonnet-4-6` MUST have `variants: {}` with no `capabilities.reasoning`
+- THEN each non-singleton (e.g. `auto-ro-gemini-3.7-flash`) MUST have flat `reasoning: true` at the model level with `capabilities === undefined`, and `variants.high.reasoningEffort === "high"`
+- AND singleton `auto-ro-claude-sonnet-4-6` MUST have `variants: {}` with no `reasoning` flag and `capabilities === undefined`
 
 #### Scenario: sync script emits identical shape
 
 - GIVEN `opencode.json` is updated by `sync-models.ts`
 - WHEN the script regenerates static models
-- THEN each entry MUST equal `buildModelMap` for same id (`capabilities` and `variants.<k>.reasoningEffort == k`)
+- THEN each entry MUST equal `buildModelMap` for the same id (flat `reasoning: true`, `capabilities === undefined`, `variants.<k>.reasoningEffort == k`)
 
 ### Requirement: Reasoning Effort Persistence
 
@@ -107,29 +105,29 @@ Generated models via `buildModelMap` (`plugins/agy-bridge-helpers.ts`) and the `
 
 ### Requirement: Stale Model Migration
 
-Re-running `./install.sh` MUST invoke the model sync script to regenerate `provider.agy-bridge.models` to enriched shape based on live data, overwriting stale entries with empty variants and missing `capabilities`. Verification MUST pass via `opencode models` (listing the synchronized `agy-bridge/auto-*` ids) and JSON inspection (`jq '.provider["agy-bridge"].models["auto-rw-gemini-3.7-flash"]'` shows `capabilities.reasoning` and `variants.*.reasoningEffort`).
+Re-running `./install.sh` MUST invoke the model sync script to regenerate `provider.agy-bridge.models` to enriched shape based on live data, overwriting stale entries with empty variants and missing flat `reasoning: true` / `capabilities === undefined`. Verification MUST pass via `opencode models` (listing the synchronized `agy-bridge/auto-*` ids) and JSON inspection (`jq '.provider["agy-bridge"].models["auto-rw-gemini-3.7-flash"]'` shows `reasoning: true` and `variants.*.reasoningEffort`).
 
 #### Scenario: Stale JSON migration
 
-- GIVEN `opencode.json` contains stale `"auto-rw-gemini-3.7-flash": { "variants": { "high": {} } }` with no `capabilities`
+- GIVEN `opencode.json` contains stale `"auto-rw-gemini-3.7-flash": { "variants": { "high": {} } }` with no flat `reasoning` or `capabilities`
 - WHEN `./install.sh` is re-run and opencode is restarted
-- THEN the entry MUST become `{ "capabilities": { "reasoning": true }, "variants": { "high": { "reasoningEffort": "high" } } }` and `buildReasoningEditState` MUST become selectable
+- THEN the entry MUST become `{ "reasoning": true, "capabilities": undefined, "variants": { "high": { "reasoningEffort": "high" } } }` and `buildReasoningEditState` MUST become selectable
 
 #### Scenario: Verification after migration
 
 - GIVEN migration has run
 - WHEN inspecting `opencode models` and `opencode.json`
-- THEN `opencode models` MUST list 16 `agy-bridge/auto-*` ids and JSON MUST show `reasoningEffort == key` for every non-singleton variant
+- THEN `opencode models` MUST list 14 `agy-bridge/auto-*` ids and JSON MUST show `reasoningEffort == key` for every non-singleton variant
 
 ### Requirement: Reasoning Effort Test Coverage
 
-`plugins/agy-bridge.test.ts` MUST assert enriched shape and MUST fail if `capabilities` or `reasoningEffort` regress.
+`plugins/agy-bridge.test.ts` MUST assert flat `reasoning: true` with `capabilities === undefined` for non-singletons and MUST fail if `reasoning` or `capabilities` regress.
 
-#### Scenario: Tests assert enriched shape
+#### Scenario: Tests assert flat shape
 
 - GIVEN `buildModelMap(groupBases(FALLBACK_MODELS))`
 - WHEN `deno test` runs
-- THEN tests MUST assert `variants.high.reasoningEffort === "high"` (all keys), `capabilities.reasoning === true` for non-singletons, and no `capabilities.reasoning` for singleton
+- THEN tests MUST assert `variants.high.reasoningEffort === "high"` (all keys), flat `reasoning: true` for non-singletons with `capabilities === undefined`, and no `capabilities.reasoning` for singleton
 
 ### Requirement: Variant-to-Suffix Wire Contract
 

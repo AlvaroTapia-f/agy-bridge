@@ -1,260 +1,133 @@
 # agy-bridge
 
 Puente local **OpenAI-compatible** que expone los modelos de tu suscripción de
-Google Antigravity para cualquier cliente (opencode en particular), con una
-regla innegociable: **todo el tráfico hacia Google lo realiza el binario
+Google Antigravity para cualquier cliente (opencode en particular).
+
+Regla innegociable: **todo el tráfico hacia Google lo realiza el binario
 oficial `agy` (CLI de Antigravity) en modo headless, con su propia
-autenticación**.
+autenticación**. El bridge jamás lee ni copia tokens, no hace OAuth propio y
+solo escucha en `127.0.0.1`.
 
-```
-opencode ──(OpenAI API)──▶ agy-bridge :7421 ──(spawn+stdin NDJSON)──▶ agy --agent raw …
-                                                              │
-                                                     cloudcode-pa.googleapis.com
-                                              (auth del propio CLI, intacta)
-```
+Respeto del servicio (no romper):
 
-El prompt viaja por **stdin** como evento NDJSON del protocolo `stream-json`
-de agy (no como argumento de `-p`): los system prompts de opencode superan los
-128 KiB que Linux permite por argumento (error `E2BIG` / "Argument list too
-long"). Verificado con payloads de ~190 KB.
+- **Solo el binario oficial**, de a **una llamada por vez** (`MAX_CONCURRENT=1`).
+- **Tres agentes según costo/riesgo:** `raw` (escape hatch costoso, no
+  recomendado), `worker-ro` (autónomo solo lectura), `worker-rw` (autónomo
+  lectura/escritura, nunca `commit`/`push` sin pedido explícito).
+- **Mantené `agy` actualizado** (versiones viejas son rechazadas server-side) y
+  nunca expongas el servicio fuera de localhost.
 
-## Invariantes anti-baneo (no romper)
-
-1. **Solo el binario oficial.** El bridge jamás lee/copiar tokens, no hace
-   OAuth propio, no habla con endpoints de Google ni suplanta fingerprints.
-2. **Una cuenta, una llamada a la vez** (`MAX_CONCURRENT=1`): los requests se
-   encolan y serializan.
-3. **Tres agentes según costo/riesgo:**
-   - **`raw` — costoso, escape hatch** (~40k tokens por `tool_call`: cada tool de opencode = sesión agy nueva). Solo lectura (`view_file`); su prompt prohíbe usar tools (resiste "ignore previous instructions"). Se mantiene por compatibilidad; no recomendado para tareas largas. `tools: []` cae a "todas" y `wait_5_seconds` rompe la init.
-   - **`worker-ro` — autónomo solo lectura** (1 sesión por tarea, sin reenvíos por tool).
-   - **`worker-rw` — autónomo lectura/escritura** (puede crear/modificar archivos; nunca `commit`/`push` sin pedido explícito). OJO: `sed_file`, `command_status`, `send_command_input` y `wait_5_seconds` rompen la init si se whitelistan.
-4. **Mantén `agy` actualizado** (versiones viejas son rechazadas server-side).
-5. Nunca compartas este servicio fuera de localhost (bind 127.0.0.1) ni añadas
-   rotación de cuentas.
+> Profundidad para desarrolladores y operadores (diagrama, invariantes
+> completas, sesiones, protocolo de tools, streaming):
+> [`docs/architecture.md`](docs/architecture.md).
 
 ## Requisitos
 
-Antes de instalar, verifica que tu máquina cumple con esto (el script canónico `install.sh` y el bootstrap `install-remote.sh` chequean los dos primeros y fallan si faltan):
+| Necesitás | Detalle |
+|---|---|
+| Suscripción de Google Antigravity + `agy` CLI instalado y autenticado | `agy --help` y `agy models` deben funcionar (el bridge solo spawnea `agy`, no hace login por vos) |
+| `deno` (v2.9.5+) | **Prerrequisito estricto**, también para la sincronización de modelos (`deno --version`; buscado en `PATH` y rutas estándar) |
+| `opencode` (v1.18+) | Si no existe `~/.config/opencode/opencode.json`, el instalador saltea el provider y avisa |
+| Linux con `systemd --user` | Para `agy-bridge.service`; sin systemd podés correr directo con `deno run` ([ver internals](docs/installer-internals.md#opción-c-instalación-manual)) |
+| `python3` | Solo para la configuración base de provider/auth en `opencode.json` y el parche de TUI |
+| `openssl` o `xxd` + `/dev/urandom` | Para generar el `AGY_TOKEN` de 24 bytes |
+| Puerto `7421` libre en `127.0.0.1` | Bind loopback; configurable vía `PORT` en `~/.config/agy-bridge/env` |
 
-- **Google Antigravity con suscripción activa** y **`agy` CLI instalado y autenticado** (`agy --help` y `agy models` deben funcionar — el bridge solo spawnea `agy`, no hace login por vos).
-- **`deno` instalado** (v2.9.5+ — `deno --version` — buscado en `PATH` y rutas estándar).
-- **`opencode` instalado** (v1.18+ — si no está `~/.config/opencode/opencode.json`, el installer saltea el provider y avisa).
-- **Linux con `systemd --user`** (para `agy-bridge.service` — sin systemd podés correr directo con `deno run`, ver Opción C).
-- **`python3`** (utilizado para configuración base de provider/auth y como fallback de modelos si Deno no estuviera disponible).
-- **`openssl` o `xxd` + `/dev/urandom`** (para generar `AGY_TOKEN` de 24 bytes).
-- **Puerto `7421` libre en `127.0.0.1`** (bind loopback — configurable vía `PORT` en `~/.config/agy-bridge/env`).
-- **Permisos:** `~/.config/agy-bridge/env` y `~/.local/share/opencode/auth.json` quedan en `chmod 600` automáticamente.
+`~/.config/agy-bridge/env` y `~/.local/share/opencode/auth.json` quedan en
+`chmod 600` automáticamente.
 
-## Instalación
+## Instalación en 3 pasos
 
-### Opción A: One-Liner Remoto (Recomendada)
+**1. Verificá los [requisitos](#requisitos)** (sobre todo `agy` autenticado y
+`deno`).
 
-Descarga el repositorio de forma segura y delega la ejecución en el instalador canónico `install.sh`:
+**2. Corré el instalador** (no requiere ni usa `sudo`; auditable antes de
+ejecutar — [detalle](docs/installer-internals.md#opción-a-one-liner-remoto)):
 
 ```sh
-# Instalación estándar (auth manual vía /connect)
+# Instalación estándar (auth manual vía /connect, ver paso 3)
 curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/install-remote.sh | bash
 
-# Con configuración automática de auth.json (recomendado para máquina limpia)
+# Recomendado en máquina limpia: configura auth.json automáticamente
 curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/install-remote.sh | bash -s -- --with-auth
 ```
 
-> **Auditoría e inocuidad:** Podés auditar el script antes de ejecutarlo con:
-> ```sh
-> curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/install-remote.sh | less
-> ```
-> El script **no requiere ni utiliza `sudo`**, no almacena ni imprime tokens literales, descarga/clona el repositorio en `AGY_BRIDGE_DIR` (`~/.local/share/agy-bridge` por defecto) y `exec`uta el instalador canónico `install.sh`.
-
-Variables de entorno configurables:
-- `AGY_BRIDGE_DIR`: Directorio destino (default: `~/.local/share/agy-bridge` o `$XDG_DATA_HOME/agy-bridge`).
-- `AGY_BRIDGE_REF`: Rama, tag o commit a clonar/descargar (default: `main`). Ejemplo: `AGY_BRIDGE_REF=v0.2.0 curl -fsSL ... | bash`.
-
-### Opción B: Instalación Local vía `install.sh` (Canónica)
-
-`install.sh` es el instalador canónico del proyecto. Realiza la configuración localmente:
-
-- **Entorno:** detecta rutas de `deno`/`agy`, inicializa `~/.config/agy-bridge/env` (desde [`.env.example`](.env.example)).
-- **Agentes:** copia perfiles `raw`, `worker-ro`, `worker-rw` a `~/.gemini/config/agents/`.
-- **Provider + plugin + modelos:** registra provider `agy-bridge` (`baseURL: "http://127.0.0.1:7421/v1"`), instala `~/.config/opencode/plugins/agy-bridge.ts` y sincroniza en vivo los modelos `auto-ro/rw-*` con `variants` dinámicos delegando en `scripts/sync-models.ts` (resolución en 3 niveles: `agy models` TSV → `GET /v1/models` → fallback agrupado).
+**3. Verificá que anda** (el instalador ya registró provider, plugin y modelos):
 
 ```sh
-./install.sh                 # provider + plugin + sincronización de modelos (auth manual vía /connect)
-./install.sh --with-auth     # + auth.json automático (recomendado para máquina limpia)
-```
-
-Flags disponibles:
-- `--force`: sobrescribe configuraciones existentes en `~/.gemini/config/agents/`.
-- `--with-auth`: configura `~/.local/share/opencode/auth.json` con `AGY_TOKEN` de `~/.config/agy-bridge/env` como `{"agy-bridge":{"type":"api","key":"..."}}`, preservando otras keys, `chmod 600`, idempotente. Sin el flag, la auth es manual vía `/connect` (ver abajo).
-
-### Opción C: Instalación Manual
-
-Si no utilizas systemd o prefieres configurar todo a mano, replica lo que hace `install.sh`:
-
-1. **Configuración de entorno:**
-   ```sh
-   mkdir -p ~/.config/agy-bridge
-   cp .env.example ~/.config/agy-bridge/env
-   # Edita ~/.config/agy-bridge/env con tu AGY_TOKEN y rutas de binarios
-   chmod 600 ~/.config/agy-bridge/env
-   ```
-
-2. **Copiar agentes:**
-   ```sh
-   mkdir -p ~/.gemini/config/agents
-   cp -r agents/* ~/.gemini/config/agents/
-   # con --force: sobrescribe existentes
-   ```
-
-3. **Instalar plugin de opencode:**
-   ```sh
-   mkdir -p ~/.config/opencode/plugins
-   cp plugins/agy-bridge.ts ~/.config/opencode/plugins/agy-bridge.ts
-   cp plugins/agy-bridge-helpers.ts ~/.config/opencode/plugins/agy-bridge-helpers.ts
-   ```
-
-4. **Registrar provider y modelos en `~/.config/opencode/opencode.json` (global):**
-   Replica lo que hace `install.sh` (ver `plugins/agy-bridge.ts`): añade `provider.agy-bridge` (`npm: "@ai-sdk/openai-compatible"`, `options.baseURL: "http://127.0.0.1:7421/v1"`) y `plugin` con la ruta del plugin. Los modelos `auto-ro/rw-*` se generan agrupando el catálogo de `GET /v1/models` por sufijo de esfuerzo; no exponer ids bare `gemini-*`/`claude-*`.
-
-5. **Configurar auth (elige una):**
-   - **Automática (como `--with-auth`):** lee `AGY_TOKEN` de `~/.config/agy-bridge/env` y hace upsert en `~/.local/share/opencode/auth.json` preservando otras keys, `chmod 600`.
-   - **Manual:** `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `AGY_TOKEN`. Alternativa env: `"apiKey": "{env:AGY_TOKEN}"` con `source ~/.config/agy-bridge/env` antes de lanzar `opencode`.
-
-6. **Ejecución del servicio:**
-   - **Con systemd de usuario:**
-     ```sh
-     mkdir -p ~/.config/systemd/user
-     sed -e "s|\${DENO_BIN}|$(which deno)|g" \
-         -e "s|\${AGY_BIN}|$(which agy)|g" \
-         -e "s|\${INSTALL_DIR}|$(pwd)|g" \
-         agy-bridge.service.template > ~/.config/systemd/user/agy-bridge.service
-     systemctl --user daemon-reload
-     systemctl --user enable --now agy-bridge
-     ```
-   - **Directo en terminal (sin systemd):**
-     ```sh
-     set -a; source ~/.config/agy-bridge/env; set +a
-     $DENO_BIN run --allow-net --allow-run=$AGY_BIN \
-       --allow-write=$HOME/.local/state/agy-bridge --allow-env agy-bridge.ts
-     ```
-
-## OpenCode Provider (global)
-
-El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.json` (solo global, nunca repo-local). `install.sh` lo configura automáticamente; para referencia manual:
-
-```json
-{
-  "provider": {
-    "agy-bridge": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "AGY Bridge",
-      "options": { "baseURL": "http://127.0.0.1:7421/v1" }
-    }
-  },
-  "plugin": ["file:///home/<user>/.config/opencode/plugins/agy-bridge.ts"]
-}
-```
-
-- `baseURL` **debe** terminar en `/v1` — el SDK añade `/chat/completions` (sin `/v1` obtienes `404`).
-- `Host` guard en el bridge: solo `127.0.0.1:*` o `localhost:*` → `Host: evil.com` devuelve `403`.
-- Plugin (`agy-bridge.ts` + `agy-bridge-helpers.ts`) agrupa el catálogo por sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>` con `variants` (ej. `auto-ro-gemini-3.7-flash` → `high/medium/low`). La selección de variante (hook `chat.message` + wrapper `fetch` sobre `7421/v1/chat/completions`) reescribe `model` al wire `auto-ro/rw-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin variante elegida, el wrapper aplica default `medium` → `high` → `low` → `thinking`; singletons sin variants se envían verbatim. Fallback agrupado actual: 8 bases × 2 perfiles = 16 ids con variants. **Nunca** exponer ids bare `gemini-*`/`claude-*`.
-
-### Sincronización de Modelos (`sync:models`)
-
-Cada instalación o actualización con `install.sh` sincroniza automáticamente el catálogo en vivo desde `agy models` TSV hacia `~/.config/opencode/opencode.json` sin duplicar configuraciones ni tocar otros providers. Para resincronizar modelos en cualquier momento sin correr el instalador completo:
-
-```sh
-# Sincronización estándar a ~/.config/opencode/opencode.json
-deno task sync:models
-
-# Previsualizar el mapa de modelos generado sin escribir archivos
-deno task sync:models --dry-run
-
-# Especificar ruta custom de configuración o binario agy alternativo
-deno run --allow-run=agy --allow-net=127.0.0.1:7421 --allow-read --allow-write --allow-env scripts/sync-models.ts --config-path /ruta/custom/opencode.json
-```
-
-**Resolución en 3 niveles y Dynamic Effort:**
-1. `agy models` (TSV en vivo sin necesidad de auth previa del bridge)
-2. `GET /v1/models` (endpoint del bridge local)
-3. Catálogo base fallback (8 bases agrupadas → 16 modelos `auto-ro/rw-*`)
-
-Cualquier nuevo modelo o esfuerzo de razonamiento expuesto por Antigravity (como `high`, `medium`, `low`, `thinking`, `ultra`) se infiere y agrupa dinámicamente bajo su base correspondiente (`auto-ro-<base>` / `auto-rw-<base>`) con `variants.<effort>.reasoningEffort`. Nunca se exponen ids bare `gemini-*`/`claude-*` directamente en el provider.
-
-### Transparencia — parche gentle-ai TUI (effort)
-
-**Por qué existe:** el provider `agy-bridge` publica correctamente `capabilities: { reasoning: true }` + `variants.*.reasoningEffort` (verificado con `cat ~/.config/opencode/opencode.json | jq` y `deno test` 17/17). Sin embargo, el SDK `@ai-sdk/openai-compatible` que usa `opencode` para el provider `agy-bridge` **pisaba** `capabilities.reasoning` a `false` al enriquecer el modelo en `api.state.provider` (el que ve el TUI). Resultado: `/sdd-model` → effort mostraba `Model ... does not expose reasoning effort options` aunque el provider nativo y `/variant` andaban bien.
-
-**Qué hace el instalador (100% transparente):** `install.sh` sección **#7** parchea idempotentemente, si existe, el TUI cacheado de gentle-ai:
-
-```
-~/.cache/opencode/packages/opencode-sdd-engram-manage@latest/dist/tui.js
-  → listReasoningEffortsFromModel(modelDef)
-```
-
-Cambio exacto (no toca otra lógica):
-```js
-// antes: if (!modelDef || modelDef?.capabilities?.reasoning !== true) return [];
-// ahora: if (!modelDef) return [];
-//        const hasReasoningEffort = Object.values(modelDef.variants).some(v=>v.reasoningEffort)
-//        if (capabilities.reasoning !== true && !hasReasoningEffort) return [];
-```
-
-Así `/sdd-model` acepta `agy-bridge` cuando trae `variants.*.reasoningEffort` aunque el SDK lo haya dejado en `false`. Singletons sin variants (ej. `claude-sonnet-4-6`) siguen correctamente en `unsupported`.
-
-**Propiedades:** idempotente (`grep -q hasReasoningEffort` → `already patched`), no toca `agy-bridge.ts` ni systemd, se reaplica solo con `./install.sh`. Si `opencode update` regenera el cache, basta re-correr `./install.sh`. Cuando `gentle-ai` lo fixee upstream, el patrón ya no matchea y el instalador avisa `may be already updated upstream` sin romper nada. Verificable con `grep -n hasReasoningEffort .../tui.js`.
-
-### Auth (sin secretos en repo)
-
-**Automático (recomendado en máquina nueva):** `./install.sh --with-auth` lee `AGY_TOKEN` de `~/.config/agy-bridge/env` y hace upsert en `~/.local/share/opencode/auth.json` preservando otras entradas, `chmod 600`, idempotente. No pisa `opencode-go` ni otras keys.
-
-**Manual (alternativa):** `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `AGY_TOKEN`:
-
-```json
-{ "agy-bridge": { "type": "api", "key": "<AGY_TOKEN>" } }
-```
-
-`auth.json` y `env` deben ser `chmod 600`. Alternativa: `"apiKey": "{env:AGY_TOKEN}"` con `source ~/.config/agy-bridge/env` antes de lanzar `opencode`. Nunca comitear el token — verifica con `grep -r AGY_TOKEN .` → 0 matches (solo `"{env:AGY_TOKEN}"`).
-
-### Verificación
-
-Checklist post-instalación (endpoints: `GET /v1/models`, `POST /v1/chat/completions`, `GET /healthz`):
-
-```sh
-# 1. Bridge vivo y auth OK
 source ~/.config/agy-bridge/env
-curl -s -H "Authorization: Bearer $AGY_TOKEN" http://127.0.0.1:7421/v1/models | head
 curl -s http://127.0.0.1:7421/healthz
-
-# 2. Host guard → 403
-curl -s -H "Host: evil.com" -H "Authorization: Bearer $AGY_TOKEN" http://127.0.0.1:7421/v1/models -w " %{http_code}\n"
-
-# 3. Sin auth → 401
-curl -s http://127.0.0.1:7421/v1/models -w " %{http_code}\n"
-
-# 4. Provider visible y sin bare ids
-opencode models | grep agy-bridge  # solo auto-ro-* y auto-rw-*
-
-# 5. Variante → wire id (picker high envía auto-ro-gemini-3.7-flash-high)
-curl -s http://127.0.0.1:7421/v1/chat/completions -H "content-type: application/json" \
-  -H "Authorization: Bearer $AGY_TOKEN" \
-  -d '{"model":"auto-ro-gemini-3.7-flash-high","messages":[{"role":"user","content":"ping"}]}' | jq .choices[0].message.content
-# Stream: añadir "stream":true y usar curl -N
+curl -s -H "Authorization: Bearer $AGY_TOKEN" http://127.0.0.1:7421/v1/models | head -c 300
 ```
 
-### Rollback
+Si el primer comando no devuelve `{"ok":true}`, andá a
+[Problemas comunes](#problemas-comunes). Checklist completo de verificación
+(auth, Host guard, variantes):
+[`docs/installer-internals.md`](docs/installer-internals.md#verificación).
 
-```sh
-# Quitar provider y auth, reiniciar opencode
-# Editar ~/.config/opencode/opencode.json: borrar "provider.agy-bridge" y la entrada de "plugin"
-# Borrar clave: jq 'del(.["agy-bridge"])' ~/.local/share/opencode/auth.json > /tmp/a.json && mv /tmp/a.json ~/.local/share/opencode/auth.json && chmod 600 ~/.local/share/opencode/auth.json
-# Reiniciar TUI y verificar: opencode models | grep -q agy-bridge && echo "still there" || echo "clean"
-```
+## Uso diario
 
-No hay cambios en `agy-bridge.ts` ni en systemd; `baseURL` loopback y `accessGuard` (Host 403, Bearer 401) permanecen.
+- **Elegí modelo por perfil:** `auto-ro-<base>` (solo lectura) o
+  `auto-rw-<base>` (lectura/escritura). Cada tarea autónoma = 1 request = 1
+  sesión agy (~7.4k tokens de overhead en `ro`, ~9.8k en `rw`). Nunca uses ids
+  bare `gemini-*`/`claude-*` en el provider.
+- **Variantes de esfuerzo:** cada modelo trae `variants`
+  (`high`/`medium`/`low`/`thinking`); si no elegís variante, se aplica
+  `medium` → `high` → `low` → `thinking`.
+- **Vigilá la cuota:** log append-only en
+  `~/.local/state/agy-bridge/usage.jsonl` (un JSON por request: fecha, modelo,
+  duración, tokens, estado).
+- Catálogo fallback si Antigravity no responde: 7 bases × 2 perfiles = 14 ids
+  (verificado en vivo el 2026-09-07). Resincronizar en cualquier momento:
+  `deno task sync:models` ([cómo funciona](docs/installer-internals.md#sincronización-de-modelos)).
 
-## Config (env)
+Contrato del modelo (forma plana, `reasoning: true`, sin `capabilities`) y
+matriz de variantes: [`docs/model-contract.md`](docs/model-contract.md).
 
-Consulta [`.env.example`](.env.example) para valores por defecto.
+## Actualizar
+
+1. Actualizá `agy` primero (versiones viejas son rechazadas server-side).
+2. Re-corré el instalador (el mismo one-liner de
+   [instalación](#instalación-en-3-pasos)) o `./install.sh` desde el repo; esto
+   resincroniza los modelos en vivo y reaplica el parche de TUI si hace falta.
+3. Solo modelos, sin instalador completo: `deno task sync:models`
+   (`--dry-run` para previsualizar sin escribir).
+
+Detalle del instalador canónico, bundle del plugin y parche de TUI:
+[`docs/installer-internals.md`](docs/installer-internals.md).
+
+## Desinstalar
+
+1. En `~/.config/opencode/opencode.json`, borrá `provider.agy-bridge` y la
+   entrada del plugin.
+2. En `~/.local/share/opencode/auth.json`, eliminá la clave `agy-bridge`
+   (preservando las demás) y dejá el archivo en `chmod 600`.
+3. Reiniciá opencode y verificá que ya no aparece el provider.
+4. Opcional: detené y deshabilitá el servicio `agy-bridge` de systemd.
+
+Comandos exactos: [`docs/installer-internals.md`](docs/installer-internals.md#rollback).
+
+## Problemas comunes
+
+| Síntoma | Solución corta |
+|---|---|
+| `401` en `/v1/models` | Falta el Bearer: `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `AGY_TOKEN`, o re-correr el instalador con `--with-auth` |
+| `403` con `Host` raro | Es el guard anti-DNS-rebind: usá `127.0.0.1` o `localhost` como host |
+| `404` en `/chat/completions` | El `baseURL` del provider **debe** terminar en `/v1` (el SDK añade `/chat/completions`) |
+| `/sdd-model` dice que el modelo no expone effort | El cache del TUI quedó viejo: re-corré `./install.sh` para reaplicar el parche ([por qué](docs/installer-internals.md#parche-del-tui-gentle-ai-effort)) |
+| Servicio caído o sin respuesta | `systemctl --user status agy-bridge`, luego `journalctl --user -u agy-bridge -f` ([diagnóstico](docs/testing.md#diagnóstico)) |
+| Puerto ocupado | Cambiá `PORT` en `~/.config/agy-bridge/env` |
+| `agy` rechazado o con errores raros | Actualizá `agy`; si cambió flags o el formato `stream-json`, hay que ajustar el parser ([nota](docs/testing.md#diagnóstico)) |
+| Modelos desactualizados | `deno task sync:models` (o con `--dry-run` para previsualizar) |
+
+Limitaciones conocidas: latencia de arranque del proceso agy por turno
+(~2-7s); los thinking tokens se contabilizan en usage pero no se muestran; en
+stream los tool-calls se bufferizan (sin deltas); `temperature`/`max_tokens` se
+ignoran (agy no los expone).
+
+## Config esencial
+
+Valores por defecto en [`.env.example`](.env.example):
 
 | Var | Default | Nota |
 |---|---|---|
@@ -269,50 +142,18 @@ Consulta [`.env.example`](.env.example) para valores por defecto.
 | `AGY_REUSE` | `off` | `on` = continúa conversaciones `raw` (no aplica en `auto-*`) |
 | `AGY_TOKEN` | *requerido* | `Authorization: Bearer <AGY_TOKEN>` |
 
-## Sesiones y tokens: por qué se comporta como se comporta
+## Para desarrolladores y operadores
 
-- **Modo autónomo (`auto-ro/rw`, recomendado): 1 tarea = 1 request = 1 sesión agy.** El modelo resuelve la tarea completa con su loop interno y devuelve un solo completion. Overhead medido: ~7.4k tokens (`ro`) / ~9.8k (`rw`). Reduce ~75/80% de tokens vs modo stateless al evitar reenviar system + schemas + historial por cada tool_call.
-- **Modo `raw` (escape hatch, no expuesto en el provider): stateless por turno.** Cada `tool_call` a opencode = sesión agy nueva. Una tarea de 3 pasos ≈ 4 sesiones (3 turnos + metadatos). Composición de un turno `raw` (~40k input): system opencode ~25k, schemas ~12k (→ ~9k con `AGY_TOOL_SCHEMA=slim`), harness ~5.5k + historial. Solo usar vía `curl` directo si necesitas texto puro.
-- **Palancas reales de consumo:** (1) tamaño de prompts/skills de opencode, (2) usar `auto-ro/rw` para colapsar N turnos en 1 sesión, (3) `AGY_TOOL_SCHEMA=slim` solo afecta a `raw`. `AGY_REUSE=on` NO ahorra en `raw` (cuesta ~6k más por turno; cache no activa) y es irrelevante en `auto-*`.
-
-## Protocolo de tools
-
-En `raw`, el bridge renderiza tools de opencode como protocolo de texto (`<tool_call>`/`<tool_result>`) y las devuelve como `tool_calls` OpenAI; la ejecución la controla opencode. `AGY_TOOLS=off` degrada a texto puro. En `auto-ro/rw` este protocolo no interviene: el agente ejecuta su loop nativo interno.
-
-## Delegación autónoma (modelos `auto-*`)
-
-Los modelos `auto-<perfil>-` ejecutan un agente agy autónomo que resuelve la tarea completa con su loop nativo y devuelve un solo completion.
-
-```
-stateless:  opencode ──n turnos──▶ bridge ──n sesiones──▶ agy raw   (contexto viaja n veces)
-auto-ro:    opencode ──1 request──▶ bridge ──1 sesión───▶ agy worker-ro (contexto viaja 1 vez)
-```
-
-- **Perfil** = agente con whitelist propia (`~/.gemini/config/agents/`):
-  - `ro` → `worker-ro`: `view_file`, `list_dir`, `grep_search`, `find_by_name`, `read_url_content`, `search_web` (~7.4k harness).
-  - `rw` → `worker-rw`: `ro` + `write_to_file`, `replace_file_content`, `multi_replace_file_content`, `run_command` (~9.8k harness). No hace `commit`/`push` sin pedido explícito. OJO: `sed_file`, `command_status`, `send_command_input`, `wait_5_seconds` rompen la init.
-- **Motor** = cualquier modelo como sufijo (`auto-ro-<modelo>` / `auto-rw-<modelo>`). El provider genera la matriz dinámicamente desde `GET /v1/models` (o fallback 8 bases × 2) y el bridge valida en `parseAutoModel`. Los ids bare stateless fueron removidos del provider; el bridge conserva el path `raw`/bare como escape hatch para API directa.
-- Streaming bufferizado + SSE `: keepalive` cada 10s (deltas intermedios no garantizan igualar al final con tools nativas). `delta_chars` se loguea para medición.
-
-## Consumo de cuota (vigilar)
-
-- Log append-only: `~/.local/state/agy-bridge/usage.jsonl` (ts, modelo, duración, tokens, status por request).
-- Overhead por tarea autónoma: ~7.4k (`ro`) / ~9.8k (`rw`); ~5.5k en `raw`.
-
-## Diagnóstico rápido
-
-```sh
-systemctl --user status agy-bridge
-journalctl --user -u agy-bridge -f
-tail ~/.local/state/agy-bridge/usage.jsonl
-# Smoke test: ver Verificación paso 5 (POST auto-ro-*)
-```
-
-Si agy cambia flags/eventos (stream-json), el bridge rompe: revisar `agy --help`, ajustar parser y correr smoke test de Verificación.
-
-## Limitaciones
-
-- Latencia de arranque de proceso agy por turno (~2-7s).
-- Thinking tokens: se contabilizan en usage, no se muestran.
-- Tool-calls en modo stream se bufferizan (no hay streaming de deltas en turnos con tools).
-- `temperature`/`max_tokens` se ignoran (agy no los expone).
+- [`docs/architecture.md`](docs/architecture.md) — diagrama, stdin NDJSON
+  (`E2BIG`/190 KB), invariantes completas, sesiones y tokens, delegación
+  autónoma, protocolo de tools, clasificador de streaming.
+- [`docs/model-contract.md`](docs/model-contract.md) — contrato plano del
+  modelo (`reasoning: true`, sin `capabilities`), variantes y `reasoningEffort`,
+  snapshot 7 bases/14 ids (2026-09-07), ids bare prohibidos.
+- [`docs/installer-internals.md`](docs/installer-internals.md) — instalador
+  canónico, instalación manual paso a paso, bundle del plugin
+  (`deno task bundle:plugin`), sincronización en 3 niveles, parche del TUI,
+  auth sin secretos en repo, verificación completa, rollback.
+- [`docs/testing.md`](docs/testing.md) — suite verde (`deno task test`;
+  80/80 verificado en vivo el 2026-09-08 — re-verificá con el comando),
+  smoke tests, diagnóstico y SDD.

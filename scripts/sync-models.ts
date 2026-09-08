@@ -1,5 +1,4 @@
 import {
-  stripEffortSuffix,
   groupBases,
   buildModelMap,
   FALLBACK_MODELS,
@@ -148,7 +147,7 @@ export async function resolveSlugs(
   // Tier 2: Bridge API GET /v1/models
   try {
     const url = `${bridgeUrl.replace(/\/+$/, "")}/v1/models`;
-    const token = options.token || safeEnvGet("AGY_TOKEN");
+    const token = options.token !== undefined ? options.token : safeEnvGet("AGY_TOKEN");
     const headers: Record<string, string> = {};
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
@@ -223,7 +222,7 @@ export async function syncModels(
     }
   }
 
-  let existingConfig: Record<string, any> = {};
+  let existingConfig: Record<string, unknown> = {};
   let fileExisted = false;
 
   try {
@@ -252,29 +251,27 @@ export async function syncModels(
     existingConfig = {};
   }
 
-  if (
-    !existingConfig.provider ||
-    typeof existingConfig.provider !== "object" ||
-    Array.isArray(existingConfig.provider)
-  ) {
-    existingConfig.provider = {};
-  }
+  const providers = (
+    existingConfig.provider &&
+    typeof existingConfig.provider === "object" &&
+    !Array.isArray(existingConfig.provider)
+  ) ? existingConfig.provider as Record<string, Record<string, unknown>> : {};
+  existingConfig.provider = providers;
 
-  if (
-    !existingConfig.provider["agy-bridge"] ||
-    typeof existingConfig.provider["agy-bridge"] !== "object" ||
-    Array.isArray(existingConfig.provider["agy-bridge"])
-  ) {
-    existingConfig.provider["agy-bridge"] = {
-      npm: "@ai-sdk/openai-compatible",
-      options: {
-        baseURL: "http://127.0.0.1:7421/v1",
-      },
-    };
-  }
+  const agyBridgeConfig = (
+    providers["agy-bridge"] &&
+    typeof providers["agy-bridge"] === "object" &&
+    !Array.isArray(providers["agy-bridge"])
+  ) ? providers["agy-bridge"] : {
+    npm: "@ai-sdk/openai-compatible",
+    options: {
+      baseURL: "http://127.0.0.1:7421/v1",
+    },
+  };
+  providers["agy-bridge"] = agyBridgeConfig;
 
   // Update models key specifically
-  existingConfig.provider["agy-bridge"].models = models;
+  agyBridgeConfig.models = models;
 
   // Atomic write: write to tmp file then rename
   const tmpPath = `${configPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;

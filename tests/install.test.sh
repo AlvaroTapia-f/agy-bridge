@@ -5,6 +5,11 @@ SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_SCRIPT="$SCRIPT_ROOT/install.sh"
 SYNC_SCRIPT="$SCRIPT_ROOT/scripts/sync-models.ts"
 
+# Ensure ~/.local/bin is in PATH for test runner if present
+if [[ -d "$HOME/.local/bin" && ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
 FAILED=0
 PASSED=0
 
@@ -129,25 +134,26 @@ assert "Live TSV includes ultra variant in reasoningEffort" 'grep -q "\"ultra\""
 rm -rf "$TMP_DIR3"
 
 # ------------------------------------------------------------------------------
-# 6. Python Fallback on Deno Sync Failure
+# 6. Deno Prerequisite & No-Python-Fallback Guard
 # ------------------------------------------------------------------------------
-echo "--- 6. Python Fallback Guard ---"
+echo "--- 6. Deno Prerequisite Guard ---"
 TMP_DIR4="$(mktemp -d)"
 MOCK_HOME4="$TMP_DIR4/home"
 MOCK_CONFIG4="$MOCK_HOME4/.config"
 MOCK_BIN4="$TMP_DIR4/bin"
 mkdir -p "$MOCK_CONFIG4/opencode" "$MOCK_BIN4"
 
-# Create mock deno that fails during sync
-cat << 'MOCK' > "$MOCK_BIN4/deno"
-#!/usr/bin/env bash
-if [[ "$*" == *"scripts/sync-models.ts"* ]]; then
-  echo "Simulated Deno sync failure" >&2
-  exit 1
-fi
-exec "$(command -v deno 2>/dev/null || echo /usr/bin/deno)" "$@"
-MOCK
-chmod +x "$MOCK_BIN4/deno"
+# Create a clean bin directory without deno
+for cmd in env bash sh sed grep cut dirname date head cp mkdir chmod cmp python3 cat; do
+  target="$(command -v "$cmd" 2>/dev/null || true)"
+  if [[ -n "$target" ]]; then
+    ln -s "$target" "$MOCK_BIN4/$cmd"
+  fi
+done
+
+# Provide mock agy so agy detection passes
+printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_BIN4/agy"
+chmod +x "$MOCK_BIN4/agy"
 
 cat << 'JSON' > "$MOCK_CONFIG4/opencode/opencode.json"
 {
@@ -155,13 +161,100 @@ cat << 'JSON' > "$MOCK_CONFIG4/opencode/opencode.json"
 }
 JSON
 
-PATH="$MOCK_BIN4:$PATH" HOME="$MOCK_HOME4" XDG_CONFIG_HOME="$MOCK_CONFIG4" "$INSTALL_SCRIPT" >/dev/null 2>&1 || true
+OUTPUT_NO_DENO="$(PATH="$MOCK_BIN4" HOME="$MOCK_HOME4" XDG_CONFIG_HOME="$MOCK_CONFIG4" "$INSTALL_SCRIPT" 2>&1 || true)"
+EXIT_NO_DENO=0
+PATH="$MOCK_BIN4" HOME="$MOCK_HOME4" XDG_CONFIG_HOME="$MOCK_CONFIG4" "$INSTALL_SCRIPT" >/dev/null 2>&1 || EXIT_NO_DENO=$?
 
-assert "Fallback ensures 14 default models exist when Deno sync fails" '
-  python3 -c "import json; data=json.load(open(\"$MOCK_CONFIG4/opencode/opencode.json\")); assert len(data[\"provider\"][\"agy-bridge\"][\"models\"]) >= 14"
+assert "PATH without deno exits non-zero pre-sync" '[[ $EXIT_NO_DENO -ne 0 ]]'
+assert "Prerequisite error message shown when deno missing from PATH" 'echo "$OUTPUT_NO_DENO" | grep -qi "deno"'
+assert "Missing deno does not attempt Python fallback generator" '
+  python3 -c "import json; data=json.load(open(\"$MOCK_CONFIG4/opencode/opencode.json\")); assert \"models\" not in data.get(\"provider\", {}).get(\"agy-bridge\", {})"
 '
 
-rm -rf "$TMP_DIR4"
+# Sub-test 6b: deno on PATH but deno --version fails
+TMP_DIR4B="$(mktemp -d)"
+MOCK_HOME4B="$TMP_DIR4B/home"
+MOCK_CONFIG4B="$MOCK_HOME4B/.config"
+MOCK_BIN4B="$TMP_DIR4B/bin"
+mkdir -p "$MOCK_CONFIG4B/opencode" "$MOCK_BIN4B"
+
+cat << 'MOCK' > "$MOCK_BIN4B/agy"
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod +x "$MOCK_BIN4B/agy"
+
+# Mock deno that fails on --version
+cat << 'MOCK' > "$MOCK_BIN4B/deno"
+#!/usr/bin/env bash
+if [[ "$*" == *"--version"* ]]; then
+  echo "Simulated deno --version failure" >&2
+  exit 1
+fi
+exec /bin/true
+MOCK
+chmod +x "$MOCK_BIN4B/deno"
+
+cat << 'JSON' > "$MOCK_CONFIG4B/opencode/opencode.json"
+{
+  "provider": {}
+}
+JSON
+
+OUTPUT_BAD_DENO="$(PATH="$MOCK_BIN4B:$PATH" HOME="$MOCK_HOME4B" XDG_CONFIG_HOME="$MOCK_CONFIG4B" "$INSTALL_SCRIPT" 2>&1 || true)"
+EXIT_BAD_DENO=0
+PATH="$MOCK_BIN4B:$PATH" HOME="$MOCK_HOME4B" XDG_CONFIG_HOME="$MOCK_CONFIG4B" "$INSTALL_SCRIPT" >/dev/null 2>&1 || EXIT_BAD_DENO=$?
+
+assert "deno --version failure exits non-zero" '[[ $EXIT_BAD_DENO -ne 0 ]]'
+assert "deno --version failure does not generate fallback models" '
+  python3 -c "import json; data=json.load(open(\"$MOCK_CONFIG4B/opencode/opencode.json\")); assert \"models\" not in data.get(\"provider\", {}).get(\"agy-bridge\", {})"
+'
+
+rm -rf "$TMP_DIR4" "$TMP_DIR4B"
+
+# ------------------------------------------------------------------------------
+# 7. Sync Failure Exits 1 (Owner-Confirmed)
+# ------------------------------------------------------------------------------
+echo "--- 7. Model Sync Failure Exit Guard ---"
+TMP_DIR5="$(mktemp -d)"
+MOCK_HOME5="$TMP_DIR5/home"
+MOCK_CONFIG5="$MOCK_HOME5/.config"
+MOCK_BIN5="$TMP_DIR5/bin"
+mkdir -p "$MOCK_CONFIG5/opencode" "$MOCK_BIN5"
+
+cat << 'MOCK' > "$MOCK_BIN5/agy"
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod +x "$MOCK_BIN5/agy"
+
+# Mock deno that passes --version but fails on sync-models.ts
+REAL_DENO="$(command -v deno 2>/dev/null || echo /usr/bin/deno)"
+cat << MOCK > "$MOCK_BIN5/deno"
+#!/usr/bin/env bash
+if [[ "\$*" == *"scripts/sync-models.ts"* ]]; then
+  echo "Simulated sync-models failure" >&2
+  exit 1
+fi
+exec "$REAL_DENO" "\$@"
+MOCK
+chmod +x "$MOCK_BIN5/deno"
+
+cat << 'JSON' > "$MOCK_CONFIG5/opencode/opencode.json"
+{
+  "provider": {}
+}
+JSON
+
+EXIT_SYNC_FAIL=0
+PATH="$MOCK_BIN5:$PATH" HOME="$MOCK_HOME5" XDG_CONFIG_HOME="$MOCK_CONFIG5" "$INSTALL_SCRIPT" >/dev/null 2>&1 || EXIT_SYNC_FAIL=$?
+
+assert "install.sh exits non-zero when model sync fails" '[[ $EXIT_SYNC_FAIL -ne 0 ]]'
+assert "Sync failure does not fall back to Python generator" '
+  python3 -c "import json; data=json.load(open(\"$MOCK_CONFIG5/opencode/opencode.json\")); assert \"models\" not in data.get(\"provider\", {}).get(\"agy-bridge\", {})"
+'
+
+rm -rf "$TMP_DIR5"
 
 
 # ------------------------------------------------------------------------------

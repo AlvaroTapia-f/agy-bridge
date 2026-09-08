@@ -1,19 +1,30 @@
+import type { Auth, Provider } from "./opencode-sdk-v2.ts";
+
 export type ProviderHook = {
   id: string;
-  models?: (provider: any, ctx: any) => Promise<Record<string, any>>;
+  models?: (
+    provider: Provider,
+    ctx: { auth?: Auth; [k: string]: unknown },
+  ) => Promise<Record<string, unknown>>;
 };
 export type AuthHook = {
   provider: string;
-  loader?: (auth: any, provider: any) => Promise<Record<string, any>>;
+  loader?: (
+    auth: Auth | undefined,
+    provider: Provider,
+  ) => Promise<Record<string, unknown>>;
   methods: Array<{ type: string; label: string }>;
 };
 export type PluginInput = {
-  client: any;
-  project: any;
+  client: unknown;
+  project: unknown;
   directory: string;
   worktree: string;
 };
-export type Plugin = (input: PluginInput, options?: any) => Promise<{
+export type Plugin = (
+  input: PluginInput,
+  options?: Record<string, unknown>,
+) => Promise<{
   auth?: AuthHook;
   provider?: ProviderHook;
   [k: string]: unknown;

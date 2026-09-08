@@ -1,6 +1,6 @@
 // RED test for bridge-effort-reasoning-exposure
 // Must fail before implementation (2.1) and pass after — strict TDD.
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals } from "@std/assert";
 import {
   stripEffortSuffix,
   groupBases,
@@ -40,10 +40,10 @@ Deno.test("stripEffortSuffix: gpt-oss-120b-medium → base+medium", () => {
   assertEquals(r.variant, "medium");
 });
 
-Deno.test("groupBases: 17 FALLBACK → 8 bases with variant subsets", () => {
+Deno.test("groupBases: 14 FALLBACK → 7 bases with variant subsets (live-verified 2026-09-07)", () => {
   const grouped = groupBases(FALLBACK_MODELS);
-  // Should dedupe to 8 distinct bases (17 slugs)
-  assertEquals(grouped.size, 8);
+  // Should dedupe to 7 distinct bases (14 slugs, live-verified 2026-09-07)
+  assertEquals(grouped.size, 7);
   const flash37 = grouped.get("gemini-3.7-flash");
   assertEquals(flash37, new Set(["high", "medium", "low"]));
   const flash38 = grouped.get("gemini-3.8-flash");
@@ -63,11 +63,11 @@ Deno.test("wireModel: no variant yields verbatim", () => {
   assertEquals(wireModel("auto-ro-claude-sonnet-4-6", undefined), "auto-ro-claude-sonnet-4-6");
 });
 
-Deno.test("buildModelMap: FALLBACK grouped -> 16 auto-ro/rw ids with variants", async () => {
+Deno.test("buildModelMap: FALLBACK grouped -> 14 auto-ro/rw ids with variants", () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
-  // 8 bases * 2 profiles = 16 ids
-  assertEquals(Object.keys(map).length, 16);
+  // 7 bases * 2 profiles = 14 ids (live-verified 2026-09-07)
+  assertEquals(Object.keys(map).length, 14);
   // picker for gemini-3.7-flash should show high/medium/low
   const m = map["auto-ro-gemini-3.7-flash"] as unknown as { variants: Record<string, unknown> };
   assertEquals(Object.keys(m.variants).sort(), ["high", "low", "medium"]);
@@ -131,13 +131,13 @@ Deno.test("provider hook fallback: returns grouped models when bridge unreachabl
   assertEquals(typeof hooks.provider?.id, "string");
   assertEquals(hooks.provider?.id, "agy-bridge");
   // call models with no auth (fallback)
-  const models = await hooks.provider!.models!({} as any, {});
+  const models = await hooks.provider!.models!({} as unknown as Record<string, unknown>, {});
   // should contain auto-ro-* entries only, no bare
   const ids = Object.keys(models);
   const hasBare = ids.some((id) => !id.startsWith("auto-ro-") && !id.startsWith("auto-rw-"));
   assertEquals(hasBare, false);
-  // should contain 16 ids
-  assertEquals(ids.length, 16);
+  // should contain 14 ids (live-verified 2026-09-07)
+  assertEquals(ids.length, 14);
   // should contain expected bases
   assertEquals(ids.includes("auto-ro-gemini-3.7-flash"), true);
   assertEquals(ids.includes("auto-rw-gemini-3.7-flash"), true);
@@ -653,3 +653,94 @@ Deno.test("3.2 RED parity: drift-guard test — plugin groupBases == helpers gro
     }
   }
 });
+
+import denoConfig from "../deno.json" with { type: "json" };
+import syncModelsSource from "../scripts/sync-models.ts" with { type: "text" };
+import syncModelsTestSource from "../scripts/sync-models.test.ts" with { type: "text" };
+import stubSource from "../stubs/opencode-plugin.ts" with { type: "text" };
+import pluginSource from "./agy-bridge.ts" with { type: "text" };
+import bridgeTestSource from "./agy-bridge.test.ts" with { type: "text" };
+import installSource from "../install.sh" with { type: "text" };
+
+Deno.test("Task 1.1 RED test: deno.json contains lint.exclude including openspec/changes/archive/**", () => {
+  const config = denoConfig as { lint?: { exclude?: string[] } };
+  assertEquals(Array.isArray(config.lint?.exclude), true, "lint.exclude must be an array");
+  assertEquals(config.lint?.exclude?.includes("openspec/changes/archive/**"), true, "lint.exclude must include openspec/changes/archive/**");
+});
+
+Deno.test("Task 1.1 RED test: deno.json contains fmt.exclude including openspec/changes/archive/**", () => {
+  const config = denoConfig as { fmt?: { exclude?: string[] } };
+  assertEquals(Array.isArray(config.fmt?.exclude), true, "fmt.exclude must be an array");
+  assertEquals(config.fmt?.exclude?.includes("openspec/changes/archive/**"), true, "fmt.exclude must include openspec/changes/archive/**");
+});
+
+Deno.test("Task 2.1 RED test: unused imports removed from scripts/sync-models.ts and sync-models.test.ts", () => {
+  assertEquals(syncModelsSource.includes("stripEffortSuffix"), false, "scripts/sync-models.ts should not import stripEffortSuffix");
+  assertEquals(syncModelsTestSource.includes("stripEffortSuffix,"), false, "scripts/sync-models.test.ts should not import unused stripEffortSuffix");
+  assertEquals(syncModelsTestSource.includes("EFFORT_SUFFIXES,"), false, "scripts/sync-models.test.ts should not import unused EFFORT_SUFFIXES");
+  assertEquals(syncModelsTestSource.includes("getDefaultConfigPath,"), false, "scripts/sync-models.test.ts should not import unused getDefaultConfigPath");
+});
+
+Deno.test("Task 2.2 RED test: stubs/opencode-plugin.ts and plugins/agy-bridge.ts have no raw 'any' or empty catch blocks", () => {
+  assertEquals(stubSource.includes(": any"), false, "stubs/opencode-plugin.ts must not contain ': any'");
+  assertEquals(pluginSource.includes("catch {}"), false, "plugins/agy-bridge.ts must not have empty 'catch {}' blocks without comment or handling");
+  assertEquals(syncModelsSource.includes("Record<string, any>"), false, "scripts/sync-models.ts must not use Record<string, any>");
+});
+
+Deno.test("Task 1.2 RED test: plugins/agy-bridge.test.ts uses deno.json bare specifier for assertions", () => {
+  const inlineSpecifier = "jsr" + ":@std/assert";
+  assertEquals(bridgeTestSource.includes(`from "${inlineSpecifier}"`), false, "plugins/agy-bridge.test.ts should not use inline jsr specifiers");
+});
+
+Deno.test("Task 4.2 RED test: install.sh requires command -v deno and deno --version gate before proceeding", () => {
+  assertEquals(installSource.includes("command -v deno"), true, "install.sh must check command -v deno");
+  assertEquals(installSource.includes("deno --version"), true, "install.sh must check deno --version");
+});
+
+Deno.test("Task 4.3 RED test: install.sh removes inline Python 4-pass generator and dead PLUGIN_HELPERS_* vars", () => {
+  assertEquals(installSource.includes("PLUGIN_HELPERS_SRC"), false, "install.sh must remove dead PLUGIN_HELPERS_SRC");
+  assertEquals(installSource.includes("PLUGIN_HELPERS_DEST"), false, "install.sh must remove dead PLUGIN_HELPERS_DEST");
+  assertEquals(installSource.includes("LOCKSTEP:plugin-4pass-live"), false, "install.sh must remove Python 4-pass generator");
+  assertEquals(installSource.includes("Generated {len(models)} fallback models via Python"), false, "install.sh must not generate fallback models via Python");
+});
+
+Deno.test("Task 4.4 RED test: install.sh exits 1 on sync failure without Python fallback", () => {
+  assertEquals(installSource.includes("attempting Python fallback"), false, "install.sh must not attempt Python fallback on sync failure");
+});
+
+import readmeSource from "../README.md" with { type: "text" };
+import agyBridgeSource from "../agy-bridge.ts" with { type: "text" };
+import openCodeProviderSpec from "../openspec/specs/opencode-provider/spec.md" with { type: "text" };
+
+Deno.test("Task 5.1 RED test: README reflects Deno prerequisite, bundle workflow, and verified 7 bases / 14 ids", () => {
+  // Python wording at L43 should not mention model fallback
+  assertEquals(readmeSource.includes("como fallback de modelos si Deno no estuviera disponible"), false, "README must not claim Python is a model fallback");
+  // Bundle workflow: plugin installation in manual steps should only copy agy-bridge.ts (bundle), not helpers
+  assertEquals(readmeSource.includes("cp plugins/agy-bridge-helpers.ts ~/.config/opencode/plugins/agy-bridge-helpers.ts"), false, "README manual install should not copy agy-bridge-helpers.ts (bundle is self-contained)");
+  // Bundle workflow mentioned
+  assertEquals(readmeSource.includes("deno task bundle:plugin"), true, "README must mention bundle:plugin workflow");
+  // 7 bases and 14 ids verified contract (live-verified 2026-09-07)
+  assertEquals(readmeSource.includes("7 bases × 2 perfiles = 14 ids"), true, "README must state 7 bases × 2 perfiles = 14 ids");
+  // Streaming in README updated (not claiming deltas intermedios no garantizan igualar al final)
+  assertEquals(readmeSource.includes("deltas intermedios no garantizan igualar al final con tools nativas"), false, "README must not have stale streaming claim");
+});
+
+Deno.test("Task 5.2 RED test: agy-bridge.ts streaming comments reflect live deltas via classifier without stale claims", () => {
+  // Check that agy-bridge.ts does not contain stale one-chunk comments or claim deltas are not guaranteed
+  assertEquals(agyBridgeSource.includes("deliver the final text in one chunk"), false, "agy-bridge.ts must not mention delivering final text in one chunk");
+  assertEquals(agyBridgeSource.includes("are NOT guaranteed to equal the final"), false, "agy-bridge.ts must not claim deltas are not guaranteed to equal final");
+});
+
+Deno.test("Task 5.3 RED test: install.sh and tests state verified 7/14 contract without stale '14 default models'", () => {
+  assertEquals(installSource.includes("14 default models"), false, "install.sh must not mention '14 default models'");
+});
+
+Deno.test("Task 5.4 RED test: opencode-provider active spec and FALLBACK_MODELS conform to verified 7 bases / 14 ids", () => {
+  const bases = groupBases(FALLBACK_MODELS);
+  assertEquals(bases.size, 7, "FALLBACK_MODELS must yield exactly 7 bases");
+  const modelMap = buildModelMap(bases);
+  assertEquals(Object.keys(modelMap).length, 14, "buildModelMap must yield exactly 14 models");
+  assertEquals(openCodeProviderSpec.includes("yields 8 bases"), false, "openspec/specs/opencode-provider/spec.md must not state 8 bases");
+  assertEquals(openCodeProviderSpec.includes("yields 7 bases"), true, "openspec/specs/opencode-provider/spec.md must state 7 bases");
+});
+

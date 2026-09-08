@@ -1,16 +1,13 @@
-import { assertEquals, assertExists } from "jsr:@std/assert";
+import { assertEquals, assertExists } from "@std/assert";
 import {
-  stripEffortSuffix,
   groupBases,
   buildModelMap,
   FALLBACK_MODELS,
-  EFFORT_SUFFIXES,
 } from "../plugins/agy-bridge-helpers.ts";
 import {
   parseTsv,
   resolveSlugs,
   syncModels,
-  getDefaultConfigPath,
 } from "./sync-models.ts";
 
 // --- parseTsv Tests (Tasks 2.1 & 4.1) ---
@@ -108,11 +105,11 @@ Deno.test("dynamic effort: multi-variant base with unknown suffixes groups clean
   assertEquals(rw.variants.max.reasoningEffort, "max");
 });
 
-Deno.test("dynamic effort: FALLBACK_MODELS equivalence (8 bases, 16 models, correct reasoning)", () => {
+Deno.test("dynamic effort: FALLBACK_MODELS equivalence (7 bases, 14 models, correct reasoning)", () => {
   const grouped = groupBases(FALLBACK_MODELS);
-  assertEquals(grouped.size, 8);
+  assertEquals(grouped.size, 7);
   const map = buildModelMap(grouped);
-  assertEquals(Object.keys(map).length, 16);
+  assertEquals(Object.keys(map).length, 14);
 
   // Check singletons vs non-singletons
   const singleton = map["auto-ro-claude-sonnet-4-6"] as {
@@ -156,7 +153,7 @@ Deno.test("dynamic effort: FALLBACK_MODELS equivalence (8 bases, 16 models, corr
 // --- resolveSlugs & Fallback Chain Tests (Tasks 2.2, 4.3, 4.4) ---
 
 Deno.test("resolveSlugs: tier 1 TSV success returns source 'tsv'", async () => {
-  const mockRunner = async () => ({
+  const mockRunner = () => Promise.resolve({
     code: 0,
     stdout: "gemini-3.7-flash-high\tGemini Flash\nclaude-sonnet-4-6\tSonnet\n",
     stderr: "",
@@ -168,12 +165,12 @@ Deno.test("resolveSlugs: tier 1 TSV success returns source 'tsv'", async () => {
 });
 
 Deno.test("resolveSlugs: tier 1 fails (non-zero exit) -> tier 2 API success returns source 'api'", async () => {
-  const mockRunner = async () => ({
+  const mockRunner = () => Promise.resolve({
     code: 1,
     stdout: "",
     stderr: "error: unauthenticated",
   });
-  const mockFetcher = async () =>
+  const mockFetcher = () => Promise.resolve(
     new Response(
       JSON.stringify({
         data: [
@@ -182,7 +179,8 @@ Deno.test("resolveSlugs: tier 1 fails (non-zero exit) -> tier 2 API success retu
         ],
       }),
       { status: 200 },
-    );
+    ),
+  );
 
   const res = await resolveSlugs({
     runner: mockRunner,
@@ -271,16 +269,15 @@ Deno.test("5.1 triangulation: fetcher omits Authorization header when token is e
 });
 
 Deno.test("resolveSlugs: tier 1 runner throws (bad binary) -> tier 2 API success", async () => {
-  const mockRunner = async () => {
-    throw new Error("Executable not found: /invalid/path/agy");
-  };
-  const mockFetcher = async () =>
+  const mockRunner = () => Promise.reject(new Error("Executable not found: /invalid/path/agy"));
+  const mockFetcher = () => Promise.resolve(
     new Response(
       JSON.stringify({
         data: [{ id: "gpt-oss-120b-medium" }],
       }),
       { status: 200 },
-    );
+    ),
+  );
 
   const res = await resolveSlugs({
     agyBin: "/invalid/path/agy",
@@ -292,18 +289,19 @@ Deno.test("resolveSlugs: tier 1 runner throws (bad binary) -> tier 2 API success
 });
 
 Deno.test("resolveSlugs: tier 1 empty output -> tier 2 API success", async () => {
-  const mockRunner = async () => ({
+  const mockRunner = () => Promise.resolve({
     code: 0,
     stdout: "id\tname\n", // only header -> parsed is []
     stderr: "",
   });
-  const mockFetcher = async () =>
+  const mockFetcher = () => Promise.resolve(
     new Response(
       JSON.stringify({
         data: [{ id: "gemini-3.6-flash-low" }],
       }),
       { status: 200 },
-    );
+    ),
+  );
 
   const res = await resolveSlugs({
     runner: mockRunner,
@@ -313,13 +311,9 @@ Deno.test("resolveSlugs: tier 1 empty output -> tier 2 API success", async () =>
   assertEquals(res.slugs, ["gemini-3.6-flash-low"]);
 });
 
-Deno.test("resolveSlugs: tier 1 and tier 2 fail -> tier 3 FALLBACK returns 17 models and source 'fallback'", async () => {
-  const mockRunner = async () => {
-    throw new Error("agy not found");
-  };
-  const mockFetcher = async () => {
-    throw new Error("Connection refused: 127.0.0.1:7421");
-  };
+Deno.test("resolveSlugs: tier 1 and tier 2 fail -> tier 3 FALLBACK returns 14 models and source 'fallback'", async () => {
+  const mockRunner = () => Promise.reject(new Error("agy not found"));
+  const mockFetcher = () => Promise.reject(new Error("Connection refused: 127.0.0.1:7421"));
 
   const res = await resolveSlugs({
     runner: mockRunner,
@@ -327,7 +321,7 @@ Deno.test("resolveSlugs: tier 1 and tier 2 fail -> tier 3 FALLBACK returns 17 mo
   });
   assertEquals(res.source, "fallback");
   assertEquals(res.slugs, [...FALLBACK_MODELS]);
-  assertEquals(res.slugs.length, 17);
+  assertEquals(res.slugs.length, 14);
 });
 
 Deno.test("resolveSlugs: threat matrix — subprocess timeout or error never crashes and falls back safely", async () => {
@@ -336,8 +330,7 @@ Deno.test("resolveSlugs: threat matrix — subprocess timeout or error never cra
     await new Promise((r) => setTimeout(r, 10));
     throw new Error("Subprocess timed out after 10000ms");
   };
-  const mockFetcher = async () =>
-    new Response("Not Found", { status: 404 });
+  const mockFetcher = () => Promise.resolve(new Response("Not Found", { status: 404 }));
 
   const res = await resolveSlugs({
     runner: mockRunner,
@@ -345,7 +338,7 @@ Deno.test("resolveSlugs: threat matrix — subprocess timeout or error never cra
   });
   // Must fall all the way to fallback without unhandled throw
   assertEquals(res.source, "fallback");
-  assertEquals(res.slugs.length, 17);
+  assertEquals(res.slugs.length, 14);
 });
 
 // --- syncModels Atomic Write & Dry-Run Tests (Tasks 2.4, 2.5, 4.5, 4.6) ---
@@ -358,25 +351,28 @@ function createMemoryFs(initialFiles: Record<string, string> = {}) {
     files,
     dirs,
     fs: {
-      readTextFile: async (path: string) => {
+      readTextFile: (path: string) => {
         if (!files.has(path)) {
-          throw new Error(`NotFound: file ${path}`);
+          return Promise.reject(new Error(`NotFound: file ${path}`));
         }
-        return files.get(path)!;
+        return Promise.resolve(files.get(path)!);
       },
-      writeTextFile: async (path: string, data: string) => {
+      writeTextFile: (path: string, data: string) => {
         files.set(path, data);
+        return Promise.resolve();
       },
-      rename: async (oldPath: string, newPath: string) => {
+      rename: (oldPath: string, newPath: string) => {
         if (!files.has(oldPath)) {
-          throw new Error(`NotFound: file ${oldPath}`);
+          return Promise.reject(new Error(`NotFound: file ${oldPath}`));
         }
         const content = files.get(oldPath)!;
         files.delete(oldPath);
         files.set(newPath, content);
+        return Promise.resolve();
       },
-      mkdir: async (path: string) => {
+      mkdir: (path: string) => {
         dirs.add(path);
+        return Promise.resolve();
       },
     },
   };
@@ -406,7 +402,7 @@ Deno.test("syncModels: atomic write preserves other providers and creates .bak b
     [configPath]: JSON.stringify(initialConfig, null, 2),
   });
 
-  const mockRunner = async () => ({
+  const mockRunner = () => Promise.resolve({
     code: 0,
     stdout: "gemini-3.7-flash-high\tGemini Flash\nclaude-sonnet-4-6\tSonnet\n",
     stderr: "",
@@ -474,12 +470,8 @@ Deno.test("syncModels: atomic write preserves other providers and creates .bak b
 Deno.test("syncModels: creates parent directories and file if not present", async () => {
   const configPath = "/test/nested/sub/opencode.json";
   const { files, fs, dirs } = createMemoryFs();
-  const mockRunner = async () => {
-    throw new Error("No agy binary");
-  };
-  const mockFetcher = async () => {
-    throw new Error("No bridge");
-  };
+  const mockRunner = () => Promise.reject(new Error("No agy binary"));
+  const mockFetcher = () => Promise.reject(new Error("No bridge"));
 
   const result = await syncModels({
     configPath,
@@ -490,7 +482,7 @@ Deno.test("syncModels: creates parent directories and file if not present", asyn
   });
 
   assertEquals(result.source, "fallback");
-  assertEquals(result.count, 16);
+  assertEquals(result.count, 14);
   assertEquals(dirs.has("/test/nested/sub"), true);
 
   const writtenContent = files.get(configPath);
@@ -502,14 +494,14 @@ Deno.test("syncModels: creates parent directories and file if not present", asyn
   );
   assertEquals(
     Object.keys(writtenConfig.provider["agy-bridge"].models).length,
-    16,
+    14,
   );
 });
 
 Deno.test("syncModels: dryRun outputs models and makes zero file mutations", async () => {
   const configPath = "/test/opencode.json";
   const { files, fs } = createMemoryFs();
-  const mockRunner = async () => ({
+  const mockRunner = () => Promise.resolve({
     code: 0,
     stdout: "gemini-3.7-flash-high\tGemini Flash\n",
     stderr: "",

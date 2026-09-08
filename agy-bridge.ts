@@ -213,7 +213,7 @@ interface OAIChatRequest {
 }
 
 interface AIMessage {
-  role: "system" | "user" | "assistant" | "tool" | (string & {});
+  role: "system" | "user" | "assistant" | "tool" | (string & Record<PropertyKey, never>);
   content?: string | Array<{ type?: string; text?: string }> | null;
   tool_calls?: Array<{
     id?: string;
