@@ -5,7 +5,7 @@
 // Source of truth: plugins/agy-bridge-helpers.ts
 
 // plugins/agy-bridge-helpers.ts
-var MODEL_MAP_VERSION = 2;
+var MODEL_MAP_VERSION = 3;
 var FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -112,9 +112,11 @@ function buildModelMap(bases) {
     ]) {
       const id = `auto-${profile}-${base}`;
       const variantMap = {};
-      for (const v of variants) variantMap[v] = {
-        reasoningEffort: v
-      };
+      for (const v of variants) {
+        variantMap[v] = {
+          reasoningEffort: v === "thinking" ? "max" : v
+        };
+      }
       out[id] = {
         id,
         name: id,

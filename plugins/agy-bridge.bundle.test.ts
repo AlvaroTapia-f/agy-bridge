@@ -168,14 +168,14 @@ Deno.test("4.2 parity: bundle map hash equals source map hash", async () => {
   assertEquals(bundleHash, helpersHash);
 });
 
-Deno.test("4.2 rebundle: bundle embeds MODEL_MAP_VERSION = 2", async () => {
+Deno.test("4.2 rebundle: bundle embeds MODEL_MAP_VERSION = 3", async () => {
   const helpersSource = await Deno.readTextFile(
     new URL("./agy-bridge-helpers.ts", import.meta.url),
   );
   assertEquals(
-    helpersSource.includes("MODEL_MAP_VERSION = 2"),
+    helpersSource.includes("MODEL_MAP_VERSION = 3"),
     true,
-    "helpers must declare MODEL_MAP_VERSION = 2",
+    "helpers must declare MODEL_MAP_VERSION = 3",
   );
   assertEquals(
     bundleText.includes("MODEL_MAP_VERSION"),

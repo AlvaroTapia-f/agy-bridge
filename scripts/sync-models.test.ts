@@ -523,7 +523,7 @@ Deno.test("syncModels: dryRun outputs models and makes zero file mutations", asy
   assertEquals(files.has(`${configPath}.bak`), false);
 });
 
-Deno.test("4.1 syncModels result stamps MODEL_MAP_VERSION", async () => {
+Deno.test("4.1 syncModels result stamps MODEL_MAP_VERSION (3 after thinking Map disposition)", async () => {
   const { fs } = createMemoryFs();
   const mockRunner = () => Promise.resolve({
     code: 0,
@@ -537,7 +537,7 @@ Deno.test("4.1 syncModels result stamps MODEL_MAP_VERSION", async () => {
     runner: mockRunner,
     fs,
   });
-  assertEquals(result.modelMapVersion, 2);
+  assertEquals(result.modelMapVersion, 3);
 });
 
 

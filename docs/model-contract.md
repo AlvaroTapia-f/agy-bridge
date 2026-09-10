@@ -25,16 +25,25 @@ No hay reescritura en el cliente: el wrapper `fetch` sobre
 `7421/v1/chat/completions` y el hook `chat.message` fueron eliminados. Cada
 ruta de entrada (TUI, directa, subagente, provider SDD) envía el id verbatim
 y el bridge verifica con `resolveWireModel` (fail-closed): solo resuelve a
-`<base>-<effort>` declarado; normaliza bare+señal solo cuando hay exactamente
-una señal explícita (`variant` o `reasoning.effort` o sufijo en el slug) que
-pertenece al conjunto declarado; singletons sin variants pasan verbatim. Todo
-lo demás es 400 nombrando los slugs con sufijo disponibles. Sin variante
-elegida en una base multi-effort, el bridge responde 400 (sin defaults
-silenciosos).
+`<base>-<effort>` declarado. El bridge acepta la elección de variante por
+cualquiera de estas señales del cuerpo del POST y las pasa todas al
+consenso: (1) `reasoning_effort` plano, (2) `reasoning.effort` anidado,
+(3) `variant`, (4) el sufijo ya presente en el slug del wire model. Si todas
+las señales presentes coinciden, resuelve al slug con sufijo; si conflicto,
+bare multi-effort sin señal, o slug desconocido, responde 400 nombrando los
+slugs con sufijo disponibles (sin defaults silenciosos). El valor `default`
+(opencode sin variante) se trata como señal ausente.
+
+Pin de wire: `opencode` **1.18.29** mapea la elección de `/variant` a la
+clave plana `reasoning_effort` en el POST (`request mapper` del binario,
+verificado con captura en vivo el 2026-09-09). La variante `thinking` no
+existe en el enum `reasoningEffort` de opencode (`none…max`): el mapa la
+anuncia como `reasoningEffort: "max"` y el bridge aplica el alias inverso
+acotado `max → thinking` solo cuando `thinking` está declarado para esa base.
 
 ## Versión del mapa y caché
 
-`MODEL_MAP_VERSION = 2` en `plugins/agy-bridge-helpers.ts` invalida cachés
+`MODEL_MAP_VERSION = 3` en `plugins/agy-bridge-helpers.ts` invalida cachés
 de variantes aguas abajo: `install.sh` purga la entrada `agy-bridge` de
 `~/.gentle-ai/cache/model-variants.json` (ese caché unía genéricos
 `{high,low,medium}` en cada fila) y `scripts/sync-models.ts` sella la versión

@@ -16,6 +16,7 @@ import {
   groupBases,
   NARRATION_SUFFIX,
   resolveWireModel,
+  variantSignals,
 } from "./plugins/agy-bridge-helpers.ts";
 
 // ---------- config ----------
@@ -207,6 +208,9 @@ interface OAIChatRequest {
   model?: string;
   variant?: string;
   reasoning?: { effort?: string };
+  // Native variant carrier (spike obs #101): opencode 1.18.29 maps a
+  // /variant pick to this flat key on the wire. No options.* key exists.
+  reasoning_effort?: string;
   messages?: AIMessage[];
   stream?: boolean;
   tools?: Array<{
@@ -988,16 +992,10 @@ async function handleChat(req: Request): Promise<Response> {
   const auto = parseAutoModel(model);
   if (auto) {
     const declared = groupBases(modelSlugs);
-    const effortSignal = typeof body.reasoning === "object" &&
-        body.reasoning !== null
-      ? (body.reasoning as { effort?: unknown }).effort
-      : undefined;
-    const resolved = resolveWireModel(
-      model,
-      typeof body.variant === "string" ? body.variant : undefined,
-      typeof effortSignal === "string" ? effortSignal : undefined,
-      declared,
-    );
+    // All accepted body signals (flat reasoning_effort, nested
+    // reasoning.effort, variant) funnel through variantSignals; the slug
+    // suffix is parsed inside resolveWireModel from the wire model itself.
+    const resolved = resolveWireModel(model, variantSignals(body), declared);
     if (!resolved.ok) return jsonError(400, resolved.message);
     return handleAutonomousChat(req, body, model, {
       ...auto,

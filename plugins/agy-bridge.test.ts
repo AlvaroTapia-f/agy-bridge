@@ -154,15 +154,21 @@ Deno.test("fetch wrapper: variant maps to suffixed wire model (unit via wireMode
 
 // --- Enriched reasoning metadata (strict TDD — RED before GREEN) ---
 
-Deno.test("buildModelMap: enriched shape — variants.*.reasoningEffort == key", () => {
+Deno.test("buildModelMap: enriched shape — reasoningEffort == key except thinking maps to max", () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
-  // every variant value must be { reasoningEffort: key }
+  // every variant value must be { reasoningEffort: key }, except the
+  // thinking Map disposition: opencode's enum has no "thinking" member
+  // (spike obs #101), so it is advertised as reasoningEffort "max".
   for (const [id, def] of Object.entries(map)) {
     const m = def as unknown as { variants: Record<string, unknown>; capabilities?: unknown };
     for (const k of Object.keys(m.variants)) {
       const v = m.variants[k] as Record<string, unknown>;
-      assertEquals(v["reasoningEffort"], k, `${id} variant ${k} reasoningEffort`);
+      assertEquals(
+        v["reasoningEffort"],
+        k === "thinking" ? "max" : k,
+        `${id} variant ${k} reasoningEffort`,
+      );
     }
   }
   // spot-check gemini-3.7-flash
@@ -190,11 +196,11 @@ Deno.test("buildModelMap: reasoning true iff variants non-empty", () => {
   assertEquals(Object.keys(opus.variants), ["thinking"]);
 });
 
-Deno.test("buildModelMap: thinking variant enriched", () => {
+Deno.test("buildModelMap: thinking variant enriched maps to reasoningEffort max", () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
   const opus = map["auto-rw-claude-opus-4-6"] as unknown as { variants: Record<string, { reasoningEffort: string }> };
-  assertEquals(opus.variants.thinking.reasoningEffort, "thinking");
+  assertEquals(opus.variants.thinking.reasoningEffort, "max");
 });
 
 Deno.test("buildModelMap: regression — gpt-oss singleton-like medium is selectable", () => {
@@ -757,8 +763,7 @@ function declaredMap(): Map<string, Set<string>> {
 Deno.test("2.3 suffixed slug passes: auto-ro-gemini-3.7-flash-high resolves", () => {
   const r = resolveWireModel(
     "auto-ro-gemini-3.7-flash-high",
-    undefined,
-    undefined,
+    [],
     declaredMap(),
   );
   assertEquals(r, { ok: true, slug: "gemini-3.7-flash-high" });
@@ -768,8 +773,7 @@ Deno.test("2.3 undeclared effort rejected: gemini-3.1-pro-medium 400s with avail
   const declared = declaredMap();
   const suffixed = resolveWireModel(
     "auto-ro-gemini-3.1-pro-medium",
-    undefined,
-    undefined,
+    [],
     declared,
   );
   assertEquals(suffixed.ok, false);
@@ -786,8 +790,7 @@ Deno.test("2.3 undeclared effort rejected: gemini-3.1-pro-medium 400s with avail
   // Triangulate: bare base + undeclared effort signal also 400s, no fallback.
   const bare = resolveWireModel(
     "auto-ro-gemini-3.1-pro",
-    "medium",
-    undefined,
+    ["medium"],
     declared,
   );
   assertEquals(bare.ok, false);
@@ -796,8 +799,7 @@ Deno.test("2.3 undeclared effort rejected: gemini-3.1-pro-medium 400s with avail
 Deno.test("2.3 bare base with agreeing signal normalizes: gpt-oss + medium", () => {
   const r = resolveWireModel(
     "auto-ro-gpt-oss-120b",
-    undefined,
-    "medium",
+    ["medium"],
     declaredMap(),
   );
   assertEquals(r, { ok: true, slug: "gpt-oss-120b-medium" });
@@ -806,8 +808,7 @@ Deno.test("2.3 bare base with agreeing signal normalizes: gpt-oss + medium", () 
 Deno.test("2.3 bare base without signal 400s: auto-ro-gemini-3.7-flash names suffixed slugs", () => {
   const r = resolveWireModel(
     "auto-ro-gemini-3.7-flash",
-    undefined,
-    undefined,
+    [],
     declaredMap(),
   );
   assertEquals(r.ok, false);
@@ -820,8 +821,7 @@ Deno.test("2.3 bare base without signal 400s: auto-ro-gemini-3.7-flash names suf
 Deno.test("2.3 singleton passes verbatim: auto-ro-claude-sonnet-4-6", () => {
   const r = resolveWireModel(
     "auto-ro-claude-sonnet-4-6",
-    undefined,
-    undefined,
+    [],
     declaredMap(),
   );
   assertEquals(r, { ok: true, slug: "claude-sonnet-4-6" });
@@ -830,11 +830,120 @@ Deno.test("2.3 singleton passes verbatim: auto-ro-claude-sonnet-4-6", () => {
 Deno.test("2.3 conflicting signals 400: suffix high + variant low", () => {
   const r = resolveWireModel(
     "auto-rw-gemini-3.7-flash-high",
-    "low",
-    undefined,
+    ["low"],
     declaredMap(),
   );
   assertEquals(r.ok, false);
+});
+
+// --- issue-8-variant-carrier Phase 2: array intake ---
+// resolveWireModel(wire, signals[], declared): all present body signals
+// (from variantSignals) are passed for consensus resolution. The slug
+// suffix stays internal. Conflict messages use the prefixed-slug form.
+
+Deno.test("issue-8 RED conflict: flat reasoning_effort high + variant low -> 400 naming suffixed slugs", () => {
+  const r = resolveWireModel(
+    "auto-ro-gemini-3.7-flash",
+    ["high", "low"],
+    declaredMap(),
+  );
+  assertEquals(r.ok, false);
+  if (!r.ok) {
+    assertEquals(
+      r.message.includes("auto-ro-gemini-3.7-flash-high"),
+      true,
+      "conflict message must name available slugs in prefixed form",
+    );
+    assertEquals(r.message.includes("auto-ro-gemini-3.7-flash-low"), true);
+    assertEquals(r.message.includes("conflicting"), true);
+  }
+});
+
+// --- issue-8-variant-carrier Phase 1: signal extraction ---
+// Pure extraction of every accepted body signal for resolveWireModel.
+// Accepted list (spec variant-carrier): flat reasoning_effort, nested
+// reasoning.effort, variant. Slug suffix stays internal (wire parsing).
+// Spike obs #101: opencode 1.18.29 sends flat reasoning_effort on /variant
+// pick; NO options.* key on the wire — options are intentionally NOT read.
+
+import { variantSignals } from "./agy-bridge-helpers.ts";
+
+Deno.test("variantSignals: flat reasoning_effort is the primary signal (spike B')", () => {
+  assertEquals(variantSignals({ reasoning_effort: "high" }), ["high"]);
+});
+
+Deno.test("variantSignals: nested reasoning.effort signal", () => {
+  assertEquals(variantSignals({ reasoning: { effort: "low" } }), ["low"]);
+});
+
+Deno.test("variantSignals: variant signal", () => {
+  assertEquals(variantSignals({ variant: "medium" }), ["medium"]);
+});
+
+Deno.test("variantSignals: multiple present signals all passed in fixed order", () => {
+  assertEquals(
+    variantSignals({ reasoning_effort: "high", variant: "high" }),
+    ["high", "high"],
+  );
+  assertEquals(
+    variantSignals({
+      reasoning_effort: "high",
+      reasoning: { effort: "high" },
+      variant: "high",
+    }),
+    ["high", "high", "high"],
+  );
+});
+
+Deno.test('variantSignals: filters empty string, "default" (opencode unset marker), and non-strings', () => {
+  // Companion non-empty cases above prove the filter, not a trivial empty.
+  assertEquals(variantSignals({}), []);
+  assertEquals(variantSignals({ reasoning_effort: "" }), []);
+  assertEquals(variantSignals({ reasoning_effort: "default" }), []);
+  assertEquals(variantSignals({ reasoning: { effort: "default" } }), []);
+  assertEquals(variantSignals({ variant: "default" }), []);
+  assertEquals(
+    variantSignals({ reasoning_effort: 5, variant: null, reasoning: "x" }),
+    [],
+  );
+});
+
+Deno.test("issue-8 nested signal composes: variantSignals(reasoning.effort) -> resolveWireModel", () => {
+  const signals = variantSignals({ reasoning: { effort: "low" } });
+  const r = resolveWireModel(
+    "auto-ro-gemini-3.7-flash",
+    signals,
+    declaredMap(),
+  );
+  assertEquals(r, { ok: true, slug: "gemini-3.7-flash-low" });
+});
+
+Deno.test("issue-8 agreeing signals compose: flat + variant high -> suffixed slug (200)", () => {
+  const signals = variantSignals({ reasoning_effort: "high", variant: "high" });
+  const r = resolveWireModel(
+    "auto-ro-gemini-3.7-flash",
+    signals,
+    declaredMap(),
+  );
+  assertEquals(r, { ok: true, slug: "gemini-3.7-flash-high" });
+});
+
+Deno.test("issue-8 unknown variant slug 400: undeclared suffix names base slugs only", () => {
+  // "xhigh" is not a known effort suffix, so the slug is parsed as an
+  // unknown base and rejected via the unknown-model path, whose available
+  // list still names the base's declared suffixed slugs (spec: 400).
+  const r = resolveWireModel(
+    "auto-ro-gemini-3.7-flash-xhigh",
+    [],
+    declaredMap(),
+  );
+  assertEquals(r.ok, false);
+  if (!r.ok) {
+    assertEquals(r.message.includes("unknown model"), true);
+    assertEquals(r.message.includes("gemini-3.7-flash-high"), true);
+    assertEquals(r.message.includes("gemini-3.7-flash-low"), true);
+    assertEquals(r.message.includes("gemini-3.7-flash-medium"), true);
+  }
 });
 
 // --- agy-bridge-model-effort-regression Phase 4: versioned cache ---
@@ -842,8 +951,62 @@ Deno.test("2.3 conflicting signals 400: suffix high + variant low", () => {
 
 import { MODEL_MAP_VERSION } from "./agy-bridge-helpers.ts";
 
-Deno.test("4.1 MODEL_MAP_VERSION is 2", () => {
-  assertEquals(MODEL_MAP_VERSION, 2);
+// --- issue-8-variant-carrier Phase 2b: thinking enum gap (Map disposition) ---
+// Spike obs #101: "thinking" is NOT in opencode's reasoningEffort enum
+// (["none","minimal","low","medium","high","xhigh","max"]). Chosen
+// disposition (design): advertise thinking:{reasoningEffort:"max"} in
+// buildModelMap, and apply a scoped reverse alias max→thinking in
+// resolveWireModel only when "thinking" is a declared effort and "max"
+// is not, so picker choices land on the -thinking slug.
+
+Deno.test("issue-8 thinking map: buildModelMap advertises thinking with reasoningEffort max", () => {
+  const map = buildModelMap(groupBases(FALLBACK_MODELS));
+  const variants = map["auto-ro-claude-opus-4-6"] as {
+    variants: Record<string, { reasoningEffort: string }>;
+  };
+  assertEquals(variants.variants["thinking"], { reasoningEffort: "max" });
+});
+
+Deno.test("issue-8 thinking alias: flat max resolves to -thinking slug when thinking declared", () => {
+  const r = resolveWireModel(
+    "auto-ro-claude-opus-4-6",
+    ["max"],
+    declaredMap(),
+  );
+  assertEquals(r, { ok: true, slug: "claude-opus-4-6-thinking" });
+});
+
+Deno.test("issue-8 thinking alias scoped: max stays unknown for bases without thinking", () => {
+  const r = resolveWireModel(
+    "auto-ro-gemini-3.7-flash",
+    ["max"],
+    declaredMap(),
+  );
+  assertEquals(r.ok, false);
+  if (!r.ok) {
+    assertEquals(r.message.includes('"max"'), true);
+  }
+});
+
+Deno.test("issue-8 thinking alias guard: max kept when base declares max itself", () => {
+  const declared = new Map<string, Set<string>>([
+    ["gpt-x", new Set(["max", "thinking"])],
+  ]);
+  const r = resolveWireModel("auto-ro-gpt-x", ["max"], declared);
+  assertEquals(r, { ok: true, slug: "gpt-x-max" });
+});
+
+Deno.test("issue-8 thinking alias: suffix thinking + flat max agree via alias", () => {
+  const r = resolveWireModel(
+    "auto-rw-claude-opus-4-6-thinking",
+    ["max"],
+    declaredMap(),
+  );
+  assertEquals(r, { ok: true, slug: "claude-opus-4-6-thinking" });
+});
+
+Deno.test("4.1 MODEL_MAP_VERSION is 3 (thinking Map disposition changes advertisement)", () => {
+  assertEquals(MODEL_MAP_VERSION, 3);
 });
 
 Deno.test("4.3 installer purges stale model-variants.json before resync", () => {

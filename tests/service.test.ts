@@ -262,6 +262,81 @@ Deno.test("Task 6.3: 400 routing errors for invalid JSON, missing model, and unk
   }
 });
 
+// --------------------------------------------------------------------------
+// issue-8-variant-carrier: handleChat body-key signal paths
+// Spike obs #101: opencode 1.18.29 sends flat reasoning_effort on a /variant
+// pick. Multi-effort base mock so auto-ro routes hit resolveWireModel.
+// --------------------------------------------------------------------------
+
+const multiEffortMockScript = `#!/usr/bin/env bash
+if [ "$1" = "models" ]; then
+  printf "gemini-3.7-flash-high\\tGemini 3.7 Flash High\\ngemini-3.7-flash-low\\tGemini 3.7 Flash Low\\ngemini-3.7-flash-medium\\tGemini 3.7 Flash Medium\\n"
+  exit 0
+fi
+
+read -r line
+printf '{"event":"result","result":{"status":"SUCCESS","response":"mock completion text","conversation_id":"mock-conv","usage":{"input_tokens":1,"output_tokens":1}}}\\n'
+exit 0
+`;
+
+Deno.test("issue-8: flat reasoning_effort body key resolves to suffixed slug (200)", async () => {
+  const harness = await ServiceHarness.create({
+    mockAgyScript: multiEffortMockScript,
+  });
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${harness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "auto-ro-gemini-3.7-flash",
+          reasoning_effort: "high",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+    );
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.choices[0].message.content, "mock completion text");
+    // The resolved real slug the bridge actually ran must be the suffixed one.
+    const usage = await Deno.readTextFile(`${harness.stateDir}/usage.jsonl`);
+    assertStringIncludes(usage, "gemini-3.7-flash-high");
+  } finally {
+    await harness.close();
+  }
+});
+
+Deno.test("issue-8: bare multi-effort base with NO accepted signal returns 400 naming suffixed slugs", async () => {
+  const harness = await ServiceHarness.create({
+    mockAgyScript: multiEffortMockScript,
+  });
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:${harness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "auto-ro-gemini-3.7-flash",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+    );
+    assertEquals(res.status, 400);
+    const body = await res.json();
+    // Fail-closed: every declared suffixed slug is named, no silent default.
+    assertStringIncludes(body.error?.message, "auto-ro-gemini-3.7-flash-high");
+    assertStringIncludes(body.error?.message, "auto-ro-gemini-3.7-flash-low");
+    assertStringIncludes(
+      body.error?.message,
+      "auto-ro-gemini-3.7-flash-medium",
+    );
+  } finally {
+    await harness.close();
+  }
+});
+
 Deno.test("Task 6.3: SSE streaming emits step deltas, [DONE], and chat.completion.chunk objects", async () => {
   const mockScript = `#!/usr/bin/env bash
 if [ "$1" = "models" ]; then

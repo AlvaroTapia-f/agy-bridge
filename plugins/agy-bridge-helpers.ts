@@ -1,7 +1,9 @@
 // LOCKSTEP:plugin-4pass-live
 // Model-map version: bump to invalidate downstream variant caches
 // (e.g. ~/.gentle-ai/cache/model-variants.json) after declared-map changes.
-export const MODEL_MAP_VERSION = 2;
+// v3: thinking Map disposition — variants advertise reasoningEffort "max"
+// for "thinking" (spike obs #101: "thinking" is not in opencode's enum).
+export const MODEL_MAP_VERSION = 3;
 export const FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -108,6 +110,28 @@ export function wireModel(base: string, variant?: string): string {
   return variant ? `${base}-${variant}` : base
 }
 
+/**
+ * Extracts every accepted variant signal from an OpenAI chat-completions
+ * body, in fixed order: flat `reasoning_effort`, nested `reasoning.effort`,
+ * `variant`. Empty strings, `"default"` (opencode's unset marker — treated
+ * as absent), and non-string values are filtered out. The slug suffix is
+ * NOT read here: it is wire-model parsing, not body parsing.
+ */
+export function variantSignals(
+  body: {
+    reasoning_effort?: unknown;
+    reasoning?: unknown;
+    variant?: unknown;
+  },
+): string[] {
+  const nested = typeof body.reasoning === "object" && body.reasoning !== null
+    ? (body.reasoning as { effort?: unknown }).effort
+    : undefined;
+  return [body.reasoning_effort, nested, body.variant].filter(
+    (s): s is string => typeof s === "string" && s !== "" && s !== "default",
+  );
+}
+
 export type ResolveWireResult =
   | { ok: true; slug: string }
   | { ok: false; message: string };
@@ -127,15 +151,17 @@ function availableSlugs(declared: Map<string, Set<string>>): string[] {
 
 /**
  * Strict fail-closed wire-model validator. Resolves an `auto-ro/rw-` wire
- * model plus explicit variant/effort signals to a bridge slug
- * (`<base>-<effort>`), or rejects with a 400 message naming available
- * suffixed slugs. Normalization applies ONLY when exactly one agreed signal
- * is a member of the declared set; singletons (zero variants) pass verbatim.
+ * model plus all present variant signals (flat reasoning_effort, nested
+ * reasoning.effort, variant — as extracted by `variantSignals`) to a bridge
+ * slug (`<base>-<effort>`), or rejects with a 400 message naming available
+ * suffixed slugs. The slug suffix is parsed from the wire model internally,
+ * so the caller never mixes body signals with slug parsing. Normalization
+ * applies ONLY when exactly one agreed signal is a member of the declared
+ * set; singletons (zero variants) pass verbatim.
  */
 export function resolveWireModel(
   wire: string,
-  variant: string | undefined,
-  effort: string | undefined,
+  signals: readonly (string | undefined)[],
   declared: Map<string, Set<string>>,
 ): ResolveWireResult {
   const auto = /^auto-(ro|rw)-(.+)$/.exec(wire);
@@ -159,34 +185,45 @@ export function resolveWireModel(
       }`,
     };
   }
-  const signals = [suffixVariant, variant, effort].filter(
-    (s): s is string => typeof s === "string" && s !== "" && s !== "default",
-  );
+  const aliased = (s: string): string =>
+    // Reverse alias for the thinking enum gap (spike obs #101): opencode
+    // advertises the "thinking" variant with reasoningEffort "max", so an
+    // arriving "max" signal maps back to the declared "thinking" effort.
+    // Scoped: only when "thinking" is declared and "max" is not itself.
+    s === "max" && !efforts.has("max") && efforts.has("thinking")
+      ? "thinking"
+      : s;
+  const all = [suffixVariant, ...signals]
+    .filter(
+      (s): s is string => typeof s === "string" && s !== "" && s !== "default",
+    )
+    .map(aliased);
   if (efforts.size === 0) {
-    if (signals.length > 0) {
+    if (all.length > 0) {
       return {
         ok: false,
-        message:
-          `unknown variant "${signals[0]}" for base "${base}"; available: ${base}`,
+        message: `unknown variant "${
+          all[0]
+        }" for base "${base}"; available: ${base}`,
       };
     }
     return { ok: true, slug: base };
   }
-  if (signals.length === 0) {
+  if (all.length === 0) {
     const avail = [...efforts].sort().map((e) => `${prefix}-${base}-${e}`);
     return {
       ok: false,
       message: `ambiguous model "${wire}"; specify one of: ${avail.join(", ")}`,
     };
   }
-  const first = signals[0];
-  if (!signals.every((s) => s === first)) {
+  const first = all[0];
+  if (!all.every((s) => s === first)) {
     return {
       ok: false,
       message: `conflicting variant signals ${
-        signals.map((s) => `"${s}"`).join(", ")
+        all.map((s) => `"${s}"`).join(", ")
       } for base "${base}"; available: ${
-        [...efforts].sort().map((e) => `${base}-${e}`).join(", ")
+        [...efforts].sort().map((e) => `${prefix}-${base}-${e}`).join(", ")
       }`,
     };
   }
@@ -194,7 +231,7 @@ export function resolveWireModel(
     return {
       ok: false,
       message: `unknown variant "${first}" for base "${base}"; available: ${
-        [...efforts].sort().map((e) => `${base}-${e}`).join(", ")
+        [...efforts].sort().map((e) => `${prefix}-${base}-${e}`).join(", ")
       }`,
     };
   }
@@ -209,7 +246,9 @@ export function buildModelMap(bases: Map<string, Set<string>>): Record<string, u
     for (const profile of ["ro", "rw"] as const) {
       const id = `auto-${profile}-${base}`
       const variantMap: Record<string, VariantSpec> = {}
-      for (const v of variants) variantMap[v] = { reasoningEffort: v }
+      for (const v of variants) {
+        variantMap[v] = { reasoningEffort: v === "thinking" ? "max" : v };
+      }
       out[id] = {
         id,
         name: id,
