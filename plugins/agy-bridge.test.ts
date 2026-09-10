@@ -744,3 +744,113 @@ Deno.test("Task 5.4 RED test: opencode-provider active spec and FALLBACK_MODELS 
   assertEquals(openCodeProviderSpec.includes("yields 7 bases"), true, "openspec/specs/opencode-provider/spec.md must state 7 bases");
 });
 
+// --- agy-bridge-model-effort-regression Phase 2: strict resolveWireModel ---
+// Fail-closed server validator. Pure function over the declared map; the
+// bridge wires it to live modelSlugs in handleChat (see agy-bridge.ts).
+
+import { resolveWireModel } from "./agy-bridge-helpers.ts";
+
+function declaredMap(): Map<string, Set<string>> {
+  return groupBases(FALLBACK_MODELS);
+}
+
+Deno.test("2.3 suffixed slug passes: auto-ro-gemini-3.7-flash-high resolves", () => {
+  const r = resolveWireModel(
+    "auto-ro-gemini-3.7-flash-high",
+    undefined,
+    undefined,
+    declaredMap(),
+  );
+  assertEquals(r, { ok: true, slug: "gemini-3.7-flash-high" });
+});
+
+Deno.test("2.3 undeclared effort rejected: gemini-3.1-pro-medium 400s with available slugs", () => {
+  const declared = declaredMap();
+  const suffixed = resolveWireModel(
+    "auto-ro-gemini-3.1-pro-medium",
+    undefined,
+    undefined,
+    declared,
+  );
+  assertEquals(suffixed.ok, false);
+  if (!suffixed.ok) {
+    assertEquals(suffixed.message.includes('"medium"'), true);
+    assertEquals(suffixed.message.includes("gemini-3.1-pro"), true);
+    assertEquals(
+      suffixed.message.includes("gemini-3.1-pro-high"),
+      true,
+      "400 must name available suffixed slugs",
+    );
+    assertEquals(suffixed.message.includes("gemini-3.1-pro-low"), true);
+  }
+  // Triangulate: bare base + undeclared effort signal also 400s, no fallback.
+  const bare = resolveWireModel(
+    "auto-ro-gemini-3.1-pro",
+    "medium",
+    undefined,
+    declared,
+  );
+  assertEquals(bare.ok, false);
+});
+
+Deno.test("2.3 bare base with agreeing signal normalizes: gpt-oss + medium", () => {
+  const r = resolveWireModel(
+    "auto-ro-gpt-oss-120b",
+    undefined,
+    "medium",
+    declaredMap(),
+  );
+  assertEquals(r, { ok: true, slug: "gpt-oss-120b-medium" });
+});
+
+Deno.test("2.3 bare base without signal 400s: auto-ro-gemini-3.7-flash names suffixed slugs", () => {
+  const r = resolveWireModel(
+    "auto-ro-gemini-3.7-flash",
+    undefined,
+    undefined,
+    declaredMap(),
+  );
+  assertEquals(r.ok, false);
+  if (!r.ok) {
+    assertEquals(r.message.includes("auto-ro-gemini-3.7-flash-high"), true);
+    assertEquals(r.message.includes("auto-ro-gemini-3.7-flash-low"), true);
+  }
+});
+
+Deno.test("2.3 singleton passes verbatim: auto-ro-claude-sonnet-4-6", () => {
+  const r = resolveWireModel(
+    "auto-ro-claude-sonnet-4-6",
+    undefined,
+    undefined,
+    declaredMap(),
+  );
+  assertEquals(r, { ok: true, slug: "claude-sonnet-4-6" });
+});
+
+Deno.test("2.3 conflicting signals 400: suffix high + variant low", () => {
+  const r = resolveWireModel(
+    "auto-rw-gemini-3.7-flash-high",
+    "low",
+    undefined,
+    declaredMap(),
+  );
+  assertEquals(r.ok, false);
+});
+
+// --- agy-bridge-model-effort-regression Phase 4: versioned cache ---
+// MODEL_MAP_VERSION invalidates stale model-variants.json downstream.
+
+import { MODEL_MAP_VERSION } from "./agy-bridge-helpers.ts";
+
+Deno.test("4.1 MODEL_MAP_VERSION is 2", () => {
+  assertEquals(MODEL_MAP_VERSION, 2);
+});
+
+Deno.test("4.3 installer purges stale model-variants.json before resync", () => {
+  assertEquals(
+    installSource.includes("model-variants.json"),
+    true,
+    "install.sh must invalidate the stale downstream cache",
+  );
+});
+

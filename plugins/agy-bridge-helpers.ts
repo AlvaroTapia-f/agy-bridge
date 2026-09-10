@@ -1,4 +1,7 @@
 // LOCKSTEP:plugin-4pass-live
+// Model-map version: bump to invalidate downstream variant caches
+// (e.g. ~/.gentle-ai/cache/model-variants.json) after declared-map changes.
+export const MODEL_MAP_VERSION = 2;
 export const FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -103,6 +106,99 @@ export function groupBases(slugs: readonly string[]): Map<string, Set<string>> {
 
 export function wireModel(base: string, variant?: string): string {
   return variant ? `${base}-${variant}` : base
+}
+
+export type ResolveWireResult =
+  | { ok: true; slug: string }
+  | { ok: false; message: string };
+
+function availableSlugs(declared: Map<string, Set<string>>): string[] {
+  const out: string[] = [];
+  const bases = [...declared.entries()].sort(([a], [b]) => a < b ? -1 : 1);
+  for (const [base, efforts] of bases) {
+    if (efforts.size === 0) {
+      out.push(base);
+    } else {
+      for (const e of [...efforts].sort()) out.push(`${base}-${e}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Strict fail-closed wire-model validator. Resolves an `auto-ro/rw-` wire
+ * model plus explicit variant/effort signals to a bridge slug
+ * (`<base>-<effort>`), or rejects with a 400 message naming available
+ * suffixed slugs. Normalization applies ONLY when exactly one agreed signal
+ * is a member of the declared set; singletons (zero variants) pass verbatim.
+ */
+export function resolveWireModel(
+  wire: string,
+  variant: string | undefined,
+  effort: string | undefined,
+  declared: Map<string, Set<string>>,
+): ResolveWireResult {
+  const auto = /^auto-(ro|rw)-(.+)$/.exec(wire);
+  if (!auto) {
+    return {
+      ok: false,
+      message: `unknown model "${wire}"; available: ${
+        availableSlugs(declared).join(", ")
+      }`,
+    };
+  }
+  const prefix = `auto-${auto[1]}`;
+  const rest = auto[2];
+  const { base, variant: suffixVariant } = stripEffortSuffix(rest);
+  const efforts = declared.get(base);
+  if (!efforts) {
+    return {
+      ok: false,
+      message: `unknown model "${rest}" in "${wire}"; available: ${
+        availableSlugs(declared).join(", ")
+      }`,
+    };
+  }
+  const signals = [suffixVariant, variant, effort].filter(
+    (s): s is string => typeof s === "string" && s !== "" && s !== "default",
+  );
+  if (efforts.size === 0) {
+    if (signals.length > 0) {
+      return {
+        ok: false,
+        message:
+          `unknown variant "${signals[0]}" for base "${base}"; available: ${base}`,
+      };
+    }
+    return { ok: true, slug: base };
+  }
+  if (signals.length === 0) {
+    const avail = [...efforts].sort().map((e) => `${prefix}-${base}-${e}`);
+    return {
+      ok: false,
+      message: `ambiguous model "${wire}"; specify one of: ${avail.join(", ")}`,
+    };
+  }
+  const first = signals[0];
+  if (!signals.every((s) => s === first)) {
+    return {
+      ok: false,
+      message: `conflicting variant signals ${
+        signals.map((s) => `"${s}"`).join(", ")
+      } for base "${base}"; available: ${
+        [...efforts].sort().map((e) => `${base}-${e}`).join(", ")
+      }`,
+    };
+  }
+  if (!efforts.has(first)) {
+    return {
+      ok: false,
+      message: `unknown variant "${first}" for base "${base}"; available: ${
+        [...efforts].sort().map((e) => `${base}-${e}`).join(", ")
+      }`,
+    };
+  }
+  return { ok: true, slug: `${base}-${first}` };
 }
 
 export type VariantSpec = { reasoningEffort: string }

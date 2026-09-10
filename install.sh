@@ -251,6 +251,32 @@ PYEOF
     echo "  [i] python3 not found — skipping opencode provider base setup"
   fi
 
+  # Force-invalidate stale downstream effort cache (model map v2 is
+  # declared-only). The gentle-ai model-variants.json unions generic
+  # {high,low,medium} into every agy-bridge row; drop only our key so it
+  # resyncs from the declared-only provider map on the next opencode run.
+  MODEL_VARIANTS_CACHE="$HOME/.gentle-ai/cache/model-variants.json"
+  if [[ -f "$MODEL_VARIANTS_CACHE" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      MODEL_VARIANTS_CACHE="$MODEL_VARIANTS_CACHE" python3 << 'PYEOF'
+import json, os, pathlib
+p = pathlib.Path(os.environ["MODEL_VARIANTS_CACHE"])
+try:
+    data = json.loads(p.read_text())
+    if isinstance(data, dict) and "agy-bridge" in data:
+        del data["agy-bridge"]
+        p.write_text(json.dumps(data, indent=2) + "\n")
+        print("  [✓] Purged stale agy-bridge entry from model-variants.json (model map v2 resync)")
+    else:
+        print("  [i] model-variants.json has no stale agy-bridge entry")
+except Exception as e:
+    print(f"  [!] Could not purge model-variants.json: {e}")
+PYEOF
+    else
+      echo "  [i] python3 not found — skipping model-variants.json purge (delete ~/.gentle-ai/cache/model-variants.json manually)"
+    fi
+  fi
+
   # Synchronize models: Deno scripts/sync-models.ts (hard requirement, fails on error)
   if [[ -f "$SCRIPT_DIR/scripts/sync-models.ts" ]]; then
     echo "  [+] Synchronizing models via Deno..."

@@ -2,6 +2,7 @@ import {
   groupBases,
   buildModelMap,
   FALLBACK_MODELS,
+  MODEL_MAP_VERSION,
 } from "../plugins/agy-bridge-helpers.ts";
 
 /**
@@ -70,6 +71,7 @@ export interface SyncModelsResult {
   count: number;
   source: ResolutionSource;
   models: Record<string, unknown>;
+  modelMapVersion: number;
   configPath?: string;
 }
 
@@ -202,6 +204,7 @@ export async function syncModels(
       count,
       source: resolution.source,
       models,
+      modelMapVersion: MODEL_MAP_VERSION,
     };
   }
 
@@ -283,6 +286,7 @@ export async function syncModels(
     count,
     source: resolution.source,
     models,
+    modelMapVersion: MODEL_MAP_VERSION,
     configPath,
   };
 }
@@ -334,7 +338,7 @@ Options:
     });
     if (!dryRun) {
       console.log(
-        `[agy-bridge] Synchronized ${result.count} models from ${result.source} to ${result.configPath}`,
+        `[agy-bridge] Synchronized ${result.count} models from ${result.source} to ${result.configPath} (model map v${result.modelMapVersion})`,
       );
     }
   } catch (err) {

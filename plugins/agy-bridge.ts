@@ -5,6 +5,7 @@
 // Source of truth: plugins/agy-bridge-helpers.ts
 
 // plugins/agy-bridge-helpers.ts
+var MODEL_MAP_VERSION = 2;
 var FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -102,9 +103,6 @@ function groupBases(slugs) {
   }
   return map;
 }
-function wireModel(base, variant) {
-  return variant ? `${base}-${variant}` : base;
-}
 function buildModelMap(bases) {
   const out = {};
   for (const [base, variants] of bases) {
@@ -156,115 +154,7 @@ async function resolveSlugs(authKey) {
     ];
   }
 }
-var FALLBACK_GROUPED = groupBases([
-  ...FALLBACK_MODELS
-]);
-var variantByModel = /* @__PURE__ */ new Map();
-function defaultVariantForBase(base) {
-  const variants = FALLBACK_GROUPED.get(base);
-  if (!variants || variants.size === 0) return void 0;
-  if (variants.has("medium")) return "medium";
-  if (variants.has("high")) return "high";
-  if (variants.has("low")) return "low";
-  if (variants.has("thinking")) return "thinking";
-  return Array.from(variants)[0];
-}
-function installFetchWrapper() {
-  const g = globalThis;
-  if (g.__agy_bridge_fetch_patched) return;
-  g.__agy_bridge_fetch_patched = true;
-  const origFetch = globalThis.fetch.bind(globalThis);
-  globalThis.fetch = async (input, init) => {
-    try {
-      const urlStr = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url ?? String(input);
-      const isTarget = urlStr.includes("127.0.0.1:7421/v1/chat/completions") || urlStr.includes("localhost:7421/v1/chat/completions") || urlStr.includes("127.0.0.1:7421/chat/completions") || urlStr.includes("localhost:7421/chat/completions");
-      if (isTarget) {
-        let bodyStr;
-        let bodyObj;
-        let isRequestBody = false;
-        if (init?.body && typeof init.body === "string") {
-          bodyStr = init.body;
-        } else if (input instanceof Request) {
-          try {
-            const cloned = input.clone();
-            bodyStr = await cloned.text();
-            isRequestBody = true;
-          } catch {
-            bodyStr = void 0;
-          }
-        }
-        if (bodyStr) {
-          try {
-            bodyObj = JSON.parse(bodyStr);
-          } catch {
-            bodyObj = void 0;
-          }
-        }
-        if (bodyObj && typeof bodyObj === "object") {
-          const modelRaw = String(bodyObj.model ?? "");
-          const variantRaw = bodyObj.variant ? String(bodyObj.variant) : void 0;
-          const storedVariant = variantByModel.get(modelRaw) || (typeof bodyObj.model === "string" ? variantByModel.get(String(bodyObj.model)) : void 0);
-          const effectiveVariant = variantRaw && variantRaw !== "default" ? variantRaw : storedVariant;
-          let shouldRewrite = false;
-          let wired;
-          if (effectiveVariant && effectiveVariant !== "default") {
-            wired = wireModel(modelRaw, effectiveVariant);
-            shouldRewrite = true;
-          } else {
-            const match = modelRaw.match(/^auto-(ro|rw)-(.+)$/);
-            if (match) {
-              const basePart = match[2];
-              const hasSuffix = EFFORT_SUFFIXES.some((s) => basePart.endsWith(`-${s}`));
-              if (!hasSuffix) {
-                const def = defaultVariantForBase(basePart);
-                if (def) {
-                  wired = wireModel(modelRaw, def);
-                  shouldRewrite = true;
-                }
-              }
-            }
-          }
-          if (shouldRewrite && wired) {
-            bodyObj.model = wired;
-            if ("variant" in bodyObj) delete bodyObj.variant;
-            const newBody = JSON.stringify(bodyObj);
-            if (isRequestBody && input instanceof Request) {
-              const newReq = new Request(input.url, {
-                method: input.method,
-                headers: input.headers,
-                body: newBody
-              });
-              return origFetch(newReq, init);
-            } else if (init) {
-              const newInit = {
-                ...init,
-                body: newBody
-              };
-              if (newInit.headers) {
-                const h = new Headers(newInit.headers);
-                h.delete("content-length");
-                newInit.headers = h;
-              }
-              return origFetch(input, newInit);
-            } else {
-              return origFetch(input, {
-                method: "POST",
-                body: newBody,
-                headers: {
-                  "content-type": "application/json"
-                }
-              });
-            }
-          }
-        }
-      }
-    } catch (_err) {
-    }
-    return origFetch(input, init);
-  };
-}
 var AgyBridgePlugin = (_input) => {
-  installFetchWrapper();
   return Promise.resolve({
     auth: {
       provider: "agy-bridge",
@@ -291,21 +181,13 @@ var AgyBridgePlugin = (_input) => {
         const grouped = groupBases(slugs);
         return buildModelMap(grouped);
       }
-    },
-    "chat.message": (input) => {
-      try {
-        if (input.variant && input.model?.modelID) {
-          variantByModel.set(input.model.modelID, input.variant);
-        }
-      } catch (_err) {
-      }
-      return Promise.resolve();
     }
   });
 };
 var agy_bridge_plugin_default = AgyBridgePlugin;
 export {
   FALLBACK_MODELS,
+  MODEL_MAP_VERSION,
   buildModelMap,
   agy_bridge_plugin_default as default,
   groupBases

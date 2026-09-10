@@ -21,11 +21,25 @@ El plugin (`agy-bridge.ts` + `agy-bridge-helpers.ts`) agrupa el catálogo por
 sufijo `{-high,-medium,-low,-thinking}` → una entrada base `auto-ro/rw-<base>`
 con `variants` (ej. `auto-ro-gemini-3.7-flash` → `high/medium/low`).
 
-La selección de variante (hook `chat.message` + wrapper `fetch` sobre
-`7421/v1/chat/completions`) reescribe `model` al wire
-`auto-ro/rw-<base>-<variant>` validado por `parseAutoModel` en el bridge. Sin
-variante elegida, el wrapper aplica default `medium` → `high` → `low` →
-`thinking`; singletons sin variants se envían verbatim.
+No hay reescritura en el cliente: el wrapper `fetch` sobre
+`7421/v1/chat/completions` y el hook `chat.message` fueron eliminados. Cada
+ruta de entrada (TUI, directa, subagente, provider SDD) envía el id verbatim
+y el bridge verifica con `resolveWireModel` (fail-closed): solo resuelve a
+`<base>-<effort>` declarado; normaliza bare+señal solo cuando hay exactamente
+una señal explícita (`variant` o `reasoning.effort` o sufijo en el slug) que
+pertenece al conjunto declarado; singletons sin variants pasan verbatim. Todo
+lo demás es 400 nombrando los slugs con sufijo disponibles. Sin variante
+elegida en una base multi-effort, el bridge responde 400 (sin defaults
+silenciosos).
+
+## Versión del mapa y caché
+
+`MODEL_MAP_VERSION = 2` en `plugins/agy-bridge-helpers.ts` invalida cachés
+de variantes aguas abajo: `install.sh` purga la entrada `agy-bridge` de
+`~/.gentle-ai/cache/model-variants.json` (ese caché unía genéricos
+`{high,low,medium}` en cada fila) y `scripts/sync-models.ts` sella la versión
+en su resultado. El bundle generado preserva el mapa declarado byte por byte
+(paridad verificada por hash en `plugins/agy-bridge.bundle.test.ts`).
 
 ## Snapshot del catálogo y regla de ids
 
