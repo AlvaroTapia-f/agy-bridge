@@ -251,10 +251,10 @@ PYEOF
     echo "  [i] python3 not found — skipping opencode provider base setup"
   fi
 
-  # Force-invalidate stale downstream effort cache (model map v2 is
-  # declared-only). The gentle-ai model-variants.json unions generic
+  # Force-invalidate stale downstream effort cache (model map v4 is
+  # explicitly masked). The gentle-ai model-variants.json unions generic
   # {high,low,medium} into every agy-bridge row; drop only our key so it
-  # resyncs from the declared-only provider map on the next opencode run.
+  # resyncs from the masked provider map on the next opencode run.
   MODEL_VARIANTS_CACHE="$HOME/.gentle-ai/cache/model-variants.json"
   if [[ -f "$MODEL_VARIANTS_CACHE" ]]; then
     if command -v python3 >/dev/null 2>&1; then
@@ -266,7 +266,7 @@ try:
     if isinstance(data, dict) and "agy-bridge" in data:
         del data["agy-bridge"]
         p.write_text(json.dumps(data, indent=2) + "\n")
-        print("  [✓] Purged stale agy-bridge entry from model-variants.json (model map v2 resync)")
+        print("  [✓] Purged stale agy-bridge entry from model-variants.json (model map v4 resync)")
     else:
         print("  [i] model-variants.json has no stale agy-bridge entry")
 except Exception as e:
@@ -275,6 +275,55 @@ PYEOF
     else
       echo "  [i] python3 not found — skipping model-variants.json purge (delete ~/.gentle-ai/cache/model-variants.json manually)"
     fi
+  fi
+
+  # Patch the global model-variants.ts cache-writer to filter {disabled:true}
+  # generics (model map v4 masking). Idempotent via marker check, backs up to
+  # model-variants.ts.bak before writing, non-fatal on layout mismatch — the
+  # v4 purge above still applies and the sync below still runs.
+  MODEL_VARIANTS_PLUGIN="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/model-variants.ts"
+  if [[ -f "$MODEL_VARIANTS_PLUGIN" ]]; then
+    if grep -q "agy-bridge-mask-v1" "$MODEL_VARIANTS_PLUGIN" 2>/dev/null; then
+      echo "  [i] model-variants.ts already patched for v4 masking"
+    elif command -v python3 >/dev/null 2>&1; then
+      MODEL_VARIANTS_PLUGIN="$MODEL_VARIANTS_PLUGIN" python3 << 'PYEOF' || echo "  [!] model-variants.ts patch error (non-fatal, continuing)" >&2
+import os, pathlib, shutil
+p = pathlib.Path(os.environ["MODEL_VARIANTS_PLUGIN"])
+try:
+    text = p.read_text()
+except Exception as e:
+    print(f"  [!] Could not read {p}: {e} (non-fatal, continuing)")
+    raise SystemExit(0)
+if "agy-bridge-mask-v1" in text:
+    print("  [i] model-variants.ts already patched for v4 masking")
+    raise SystemExit(0)
+old = """          if (m.variants && Object.keys(m.variants).length > 0) {
+            variants[prov.id] = variants[prov.id] || {}
+            variants[prov.id][modelId] = Object.keys(m.variants).sort()
+          }"""
+new = """          // agy-bridge-mask-v1: filter {disabled:true} generics, intersect reasoning_options (model map v4)
+          if (m.variants && typeof m.variants === "object") {
+            const keys = Object.entries(m.variants)
+              .filter(([, s]) => !(s as { disabled?: boolean })?.disabled).map(([k]) => k)
+            const opts = Array.isArray(m.reasoning_options) ? new Set(m.reasoning_options) : null
+            const enabled = (opts ? keys.filter((k) => opts.has(k)) : keys).sort()
+            if (enabled.length > 0) {
+              variants[prov.id] = variants[prov.id] || {}
+              variants[prov.id][modelId] = enabled
+            }
+          }"""
+if old not in text:
+    print("  [!] model-variants.ts layout mismatch — patch skipped (non-fatal, manual: see docs/model-contract.md)")
+    raise SystemExit(0)
+shutil.copy2(p, f"{p}.bak")
+p.write_text(text.replace(old, new, 1))
+print("  [✓] Patched model-variants.ts for v4 masking (backup at model-variants.ts.bak)")
+PYEOF
+    else
+      echo "  [i] python3 not found — skipping model-variants.ts patch (non-fatal, manual: see docs)"
+    fi
+  else
+    echo "  [i] model-variants.ts not found (fresh layout, skipping v4 patch)"
   fi
 
   # Synchronize models: Deno scripts/sync-models.ts (hard requirement, fails on error)
