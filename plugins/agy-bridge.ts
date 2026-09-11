@@ -5,7 +5,7 @@
 // Source of truth: plugins/agy-bridge-helpers.ts
 
 // plugins/agy-bridge-helpers.ts
-var MODEL_MAP_VERSION = 3;
+var MODEL_MAP_VERSION = 4;
 var FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -103,6 +103,11 @@ function groupBases(slugs) {
   }
   return map;
 }
+var GENERIC_EFFORTS = [
+  "high",
+  "medium",
+  "low"
+];
 function buildModelMap(bases) {
   const out = {};
   for (const [base, variants] of bases) {
@@ -117,6 +122,15 @@ function buildModelMap(bases) {
           reasoningEffort: v === "thinking" ? "max" : v
         };
       }
+      if (variants.size > 0) {
+        for (const g of GENERIC_EFFORTS) {
+          if (!(g in variantMap)) {
+            variantMap[g] = {
+              disabled: true
+            };
+          }
+        }
+      }
       out[id] = {
         id,
         name: id,
@@ -128,7 +142,10 @@ function buildModelMap(bases) {
           reasoning: true,
           interleaved: {
             field: "reasoning_content"
-          }
+          },
+          reasoning_options: [
+            ...variants
+          ].sort()
         } : {},
         variants: variantMap
       };

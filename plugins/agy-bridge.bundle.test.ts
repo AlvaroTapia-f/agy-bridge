@@ -79,34 +79,61 @@ Deno.test("Task 3.4 Drift test: bundle contains @ts-nocheck and GENERATED banner
 
 // --- agy-bridge-model-effort-regression Phase 1: union author + version guard ---
 // Runtime inspect 2026-09-09 (read-only):
-// - provider.models() raw (plugin source, bridge down -> FALLBACK_MODELS) is
+// - provider.models() raw (plugin source, bridge down -> FALLBACK_MODELS) was
 //   DECLARED-ONLY: 3.1-pro high/low, opus-4-6 thinking, gpt-oss-120b medium,
 //   sonnet-4-6 no variants.
 // - ~/.gentle-ai/cache/model-variants.json unions generic {high,low,medium}
 //   into every agy-bridge row (3.1-pro +medium; opus-4-6 +high/low/medium;
 //   gpt-oss-120b +high/low; sonnet absent).
 // Union author: downstream model-variants cache-writer, NOT provider.models(),
-// NOT opencode core enrichment. These approval tests lock the raw side.
+// NOT opencode core enrichment.
+// v4 masking (modelo-agy-efforts-incorrectos): the raw side is now explicitly
+// masked — undeclared generics are present as {disabled:true} so the runtime
+// merge cannot inject unmasked entries. These approval tests lock the masked
+// raw side: the enabled-after-masking view stays declared-only.
 
-Deno.test("1.1 union author: provider.models() raw is declared-only", async () => {
+const enabledVariantKeys = (
+  variants: Record<string, unknown> | undefined,
+): string[] =>
+  Object.entries(variants ?? {})
+    .filter(([, spec]) => !(spec as { disabled?: boolean })?.disabled)
+    .map(([k]) => k)
+    .sort();
+
+Deno.test("1.1 union author: provider.models() raw masks undeclared generics with {disabled:true}", async () => {
   const mod = await import("./agy-bridge.ts");
   const hooks = await mod.default({} as never);
   const models = await hooks.provider!.models!({}, {}) as Record<
     string,
-    { variants?: Record<string, unknown> }
+    {
+      variants?: Record<string, unknown>;
+      reasoning_options?: unknown;
+    }
   >;
   const variantsOf = (id: string): string[] =>
-    Object.keys(models[id]?.variants ?? {}).sort();
-  // Declared subsets: any generic union here would mean OUR provider regressed.
+    enabledVariantKeys(models[id]?.variants);
+  // Enabled-after-masking: any generic union here would mean OUR provider regressed.
   assertEquals(variantsOf("auto-ro-gemini-3.1-pro"), ["high", "low"]);
   assertEquals(variantsOf("auto-rw-gemini-3.1-pro"), ["high", "low"]);
   assertEquals(variantsOf("auto-ro-claude-opus-4-6"), ["thinking"]);
   assertEquals(variantsOf("auto-ro-gpt-oss-120b"), ["medium"]);
   assertEquals(variantsOf("auto-ro-claude-sonnet-4-6"), []);
   assertEquals(variantsOf("auto-ro-gemini-3.7-flash"), ["high", "low", "medium"]);
+  // Masked keys are exactly {disabled:true} — deep-equal, no reasoningEffort.
+  const pro = models["auto-ro-gemini-3.1-pro"];
+  assertEquals(pro?.variants?.["medium"], { disabled: true });
+  const opus = models["auto-ro-claude-opus-4-6"];
+  assertEquals(opus?.variants?.["high"], { disabled: true });
+  assertEquals(opus?.variants?.["low"], { disabled: true });
+  assertEquals(opus?.variants?.["medium"], { disabled: true });
+  const gpt = models["auto-ro-gpt-oss-120b"];
+  assertEquals(gpt?.variants?.["high"], { disabled: true });
+  assertEquals(gpt?.variants?.["low"], { disabled: true });
+  // reasoning_options carries declared truth for the downstream filter.
+  assertEquals(pro?.reasoning_options, ["high", "low"]);
 });
 
-Deno.test("1.2 version-guard: bundle variants keys are a subset of the declared map", () => {
+Deno.test("1.2 version-guard: bundle enabled variants are a subset of the declared map; masked keys are exactly {disabled:true}", () => {
   const declared = helpersGroupBases(FALLBACK_MODELS);
   const bundleGrouped = bundleGroupBases(FALLBACK_MODELS);
   const bundleMap: Record<string, unknown> = bundleBuildModelMap(
@@ -115,33 +142,39 @@ Deno.test("1.2 version-guard: bundle variants keys are a subset of the declared 
   for (const [id, def] of Object.entries(bundleMap)) {
     const base = id.replace(/^auto-(ro|rw)-/, "");
     const allowed = declared.get(base) ?? new Set<string>();
-    const keys = Object.keys(
-      (def as { variants: Record<string, unknown> }).variants,
-    );
-    for (const key of keys) {
-      assertEquals(
-        allowed.has(key),
-        true,
-        `${id} exposes undeclared variant "${key}"`,
-      );
+    const variants = (def as { variants: Record<string, unknown> }).variants;
+    for (const [key, spec] of Object.entries(variants)) {
+      if ((spec as { disabled?: boolean })?.disabled === true) {
+        assertEquals(
+          spec,
+          { disabled: true },
+          `${id} masked variant "${key}" must be exactly {disabled:true}`,
+        );
+      } else {
+        assertEquals(
+          allowed.has(key),
+          true,
+          `${id} exposes undeclared enabled variant "${key}"`,
+        );
+      }
     }
   }
-  // Triangulate the exact regression symptoms: undeclared efforts absent.
+  // Triangulate the masking contract on the regression symptoms.
   const pro = bundleMap["auto-ro-gemini-3.1-pro"] as {
     variants: Record<string, unknown>;
   };
-  assertEquals("medium" in pro.variants, false);
+  assertEquals(pro.variants.medium, { disabled: true });
   const opus = bundleMap["auto-ro-claude-opus-4-6"] as {
     variants: Record<string, unknown>;
   };
-  assertEquals("high" in opus.variants, false);
-  assertEquals("low" in opus.variants, false);
-  assertEquals("medium" in opus.variants, false);
+  assertEquals(opus.variants.high, { disabled: true });
+  assertEquals(opus.variants.low, { disabled: true });
+  assertEquals(opus.variants.medium, { disabled: true });
   const gpt = bundleMap["auto-ro-gpt-oss-120b"] as {
     variants: Record<string, unknown>;
   };
-  assertEquals("high" in gpt.variants, false);
-  assertEquals("low" in gpt.variants, false);
+  assertEquals(gpt.variants.high, { disabled: true });
+  assertEquals(gpt.variants.low, { disabled: true });
 });
 
 // --- agy-bridge-model-effort-regression Phase 4: rebundle parity ---
@@ -168,32 +201,38 @@ Deno.test("4.2 parity: bundle map hash equals source map hash", async () => {
   assertEquals(bundleHash, helpersHash);
 });
 
-Deno.test("4.2 rebundle: bundle embeds MODEL_MAP_VERSION = 3", async () => {
+Deno.test("4.2 rebundle: bundle embeds MODEL_MAP_VERSION = 4", async () => {
   const helpersSource = await Deno.readTextFile(
     new URL("./agy-bridge-helpers.ts", import.meta.url),
   );
   assertEquals(
-    helpersSource.includes("MODEL_MAP_VERSION = 3"),
+    helpersSource.includes("MODEL_MAP_VERSION = 4"),
     true,
-    "helpers must declare MODEL_MAP_VERSION = 3",
+    "helpers must declare MODEL_MAP_VERSION = 4",
   );
   assertEquals(
     bundleText.includes("MODEL_MAP_VERSION"),
     true,
     "stale bundle: run deno task bundle:plugin",
   );
+  assertEquals(
+    bundleText.includes("MODEL_MAP_VERSION = 4"),
+    true,
+    "stale bundle: run deno task bundle:plugin to embed v4",
+  );
 });
 
 // --- agy-bridge-model-effort-regression Phase 5: entry-path matrix ---
 // TUI, direct, subagent, and SDD-provider paths all consume the single
 // provider.models() fn below. This test locks that all surfaces expose
-// identical declared-only variant sets (ro mirrors rw; no undeclared key
-// on any id). Live smoke 2026-09-09: GET /v1/models -> 14 declared slugs;
+// identical enabled-after-masking variant sets (ro mirrors rw; every
+// reasoning model pre-populates the generic union with {disabled:true} on
+// undeclared keys). Live smoke 2026-09-09: GET /v1/models -> 14 declared slugs;
 // bare auto-ro-gemini-3.7-flash -> 400 ambiguous+specify-one-of;
 // auto-ro-gemini-3.1-pro-medium -> 400 unknown-variant;
 // singleton + bare gpt-oss-120b w/ effort medium -> live 200 "pong".
 
-Deno.test("5.1 entry-path matrix: all surfaces expose identical declared-only variants", async () => {
+Deno.test("5.1 entry-path matrix: all surfaces expose identical enabled-after-masking variants", async () => {
   const mod = await import("./agy-bridge.ts");
   const hooks = await mod.default({} as never);
   const models = await hooks.provider!.models!({}, {}) as Record<
@@ -202,17 +241,28 @@ Deno.test("5.1 entry-path matrix: all surfaces expose identical declared-only va
   >;
   const declared = helpersGroupBases(FALLBACK_MODELS);
   const variantsOf = (id: string): string[] =>
-    Object.keys(models[id]?.variants ?? {}).sort();
-  // ro mirrors rw on every base; each set equals the declared subset.
+    enabledVariantKeys(models[id]?.variants);
+  // ro mirrors rw on every base; each enabled set equals the declared subset.
   for (const [base, efforts] of declared.entries()) {
     const expected = [...efforts].sort();
     assertEquals(variantsOf(`auto-ro-${base}`), expected, `ro ${base}`);
     assertEquals(variantsOf(`auto-rw-${base}`), expected, `rw ${base}`);
   }
-  // Triangulate: regression symptoms absent on BOTH profiles.
-  assertEquals(variantsOf("auto-rw-gemini-3.1-pro").includes("medium"), false);
-  assertEquals(variantsOf("auto-rw-claude-opus-4-6").includes("high"), false);
-  assertEquals(variantsOf("auto-rw-gpt-oss-120b").includes("high"), false);
+  // Triangulate: regression symptoms persist as {disabled:true} on BOTH profiles.
+  const proRw = models["auto-rw-gemini-3.1-pro"]?.variants ?? {};
+  assertEquals(proRw["medium"], { disabled: true });
+  const opusRw = models["auto-rw-claude-opus-4-6"]?.variants ?? {};
+  assertEquals(opusRw["high"], { disabled: true });
+  const gptRw = models["auto-rw-gpt-oss-120b"]?.variants ?? {};
+  assertEquals(gptRw["high"], { disabled: true });
+  // Every reasoning model pre-populates the full generic union.
+  for (const [base, efforts] of declared.entries()) {
+    if (efforts.size === 0) continue;
+    const keys = Object.keys(models[`auto-ro-${base}`]?.variants ?? {});
+    for (const g of ["high", "medium", "low"]) {
+      assertEquals(keys.includes(g), true, `ro ${base} missing generic key "${g}"`);
+    }
+  }
   // Exactly 14 ids, no bare ids leaked to any surface.
   assertEquals(Object.keys(models).length, 14);
   for (const id of Object.keys(models)) {
