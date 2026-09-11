@@ -523,7 +523,7 @@ Deno.test("syncModels: dryRun outputs models and makes zero file mutations", asy
   assertEquals(files.has(`${configPath}.bak`), false);
 });
 
-Deno.test("4.1 syncModels result stamps MODEL_MAP_VERSION (3 after thinking Map disposition)", async () => {
+Deno.test("4.1 syncModels result stamps MODEL_MAP_VERSION (4 with explicit variant masking)", async () => {
   const { fs } = createMemoryFs();
   const mockRunner = () => Promise.resolve({
     code: 0,
@@ -537,7 +537,78 @@ Deno.test("4.1 syncModels result stamps MODEL_MAP_VERSION (3 after thinking Map 
     runner: mockRunner,
     fs,
   });
-  assertEquals(result.modelMapVersion, 3);
+  assertEquals(result.modelMapVersion, 4);
+});
+
+Deno.test("3.2 syncModels persists masked entries: undeclared generics are {disabled:true}", async () => {
+  const configPath = "/test/opencode.json";
+  const { files, fs } = createMemoryFs({
+    [configPath]: JSON.stringify({ provider: {} }),
+  });
+  // Mock TSV declares gemini-3.7-flash-high ONLY — medium/low must persist masked.
+  const mockRunner = () => Promise.resolve({
+    code: 0,
+    stdout: "gemini-3.7-flash-high\tGemini Flash High\n",
+    stderr: "",
+  });
+
+  const result = await syncModels({
+    configPath,
+    runner: mockRunner,
+    fs,
+    printJson: false,
+  });
+
+  assertEquals(result.modelMapVersion, 4);
+  const writtenContent = files.get(configPath);
+  assertExists(writtenContent);
+  const writtenConfig = JSON.parse(writtenContent);
+  const flash = writtenConfig.provider["agy-bridge"].models["auto-ro-gemini-3.7-flash"];
+  assertExists(flash);
+  // Declared effort stays enabled with the slug-suffix truth.
+  assertEquals(flash.variants.high, { reasoningEffort: "high" });
+  // Undeclared generics persist as exactly {disabled:true}.
+  assertEquals(flash.variants.medium, { disabled: true });
+  assertEquals(flash.variants.low, { disabled: true });
+  // Declared-truth carrier lists only the declared effort.
+  assertEquals(flash.reasoning_options, ["high"]);
+});
+
+Deno.test("3.2 triangulation: partial declared set masks the gap, singletons stay untouched", async () => {
+  const configPath = "/test/opencode.json";
+  const { files, fs } = createMemoryFs({
+    [configPath]: JSON.stringify({ provider: {} }),
+  });
+  const mockRunner = () => Promise.resolve({
+    code: 0,
+    stdout: "gemini-3.1-pro-high\tGemini Pro High\ngemini-3.1-pro-low\tGemini Pro Low\nclaude-sonnet-4-6\tSonnet\n",
+    stderr: "",
+  });
+
+  await syncModels({
+    configPath,
+    runner: mockRunner,
+    fs,
+    printJson: false,
+  });
+
+  const writtenContent = files.get(configPath);
+  assertExists(writtenContent);
+  const writtenConfig = JSON.parse(writtenContent);
+  const models = writtenConfig.provider["agy-bridge"].models;
+
+  const pro = models["auto-rw-gemini-3.1-pro"];
+  assertExists(pro);
+  assertEquals(pro.variants.high, { reasoningEffort: "high" });
+  assertEquals(pro.variants.low, { reasoningEffort: "low" });
+  assertEquals(pro.variants.medium, { disabled: true });
+  assertEquals(pro.reasoning_options, ["high", "low"]);
+
+  const singleton = models["auto-rw-claude-sonnet-4-6"];
+  assertExists(singleton);
+  assertEquals(Object.keys(singleton.variants).length, 0);
+  assertEquals(singleton.reasoning_options, undefined);
+  assertEquals(singleton.reasoning, undefined);
 });
 
 

@@ -258,6 +258,80 @@ rm -rf "$TMP_DIR5"
 
 
 # ------------------------------------------------------------------------------
+# 8. v4 Distribution: model-variants.ts Patch + Purge Wording
+# ------------------------------------------------------------------------------
+echo "--- 8. v4 Distribution ---"
+assert "install.sh purge comment references model map v4" 'grep -q "model map v4" "$INSTALL_SCRIPT"'
+assert "install.sh has no stale model map v2 wording" '! grep -q "model map v2" "$INSTALL_SCRIPT"'
+assert "install.sh contains idempotent model-variants patch marker" 'grep -q "agy-bridge-mask-v1" "$INSTALL_SCRIPT"'
+assert "install.sh backs up model-variants.ts before patching" 'grep -q "model-variants.ts.bak" "$INSTALL_SCRIPT"'
+assert "install.sh patch step is documented non-fatal" 'grep -q "non-fatal" "$INSTALL_SCRIPT"'
+
+TMP_DIR6="$(mktemp -d)"
+MOCK_HOME6="$TMP_DIR6/home"
+MOCK_CONFIG6="$MOCK_HOME6/.config"
+mkdir -p "$MOCK_CONFIG6/opencode/plugins" "$MOCK_HOME6/.gentle-ai/cache"
+
+cat << 'JSON' > "$MOCK_CONFIG6/opencode/opencode.json"
+{
+  "provider": {}
+}
+JSON
+
+# Seed UNPATCHED upstream-layout model-variants.ts (verbatim loop shape).
+# NOTE: the 4-line cache-writer block below keeps the exact upstream
+# indentation (10/12 spaces) — the installer patch matches it literally.
+cat << 'TS' > "$MOCK_CONFIG6/opencode/plugins/model-variants.ts"
+export const ModelVariantsPlugin = async (input: never) => {
+  async function refreshVariantsCache() {
+    const providerList: any[] = [];
+    const variants: Record<string, Record<string, string[]>> = {}
+    for (const prov of providerList) {
+      for (const [modelId, model] of Object.entries(prov.models ?? {})) {
+        const m = model as any
+          if (m.variants && Object.keys(m.variants).length > 0) {
+            variants[prov.id] = variants[prov.id] || {}
+            variants[prov.id][modelId] = Object.keys(m.variants).sort()
+          }
+      }
+    }
+    void variants;
+  }
+  void refreshVariantsCache;
+  void input;
+  return {}
+}
+export default ModelVariantsPlugin
+TS
+
+# Seed stale cache with an agy-bridge key
+cat << 'JSON' > "$MOCK_HOME6/.gentle-ai/cache/model-variants.json"
+{ "agy-bridge": { "auto-ro-gemini-3.1-pro": ["high", "low", "medium"] }, "openai": { "gpt-4o": [] } }
+JSON
+
+OUTPUT_V4="$(HOME="$MOCK_HOME6" XDG_CONFIG_HOME="$MOCK_CONFIG6" "$INSTALL_SCRIPT" 2>&1 || true)"
+
+assert "model-variants.ts patched with mask marker" 'grep -q "agy-bridge-mask-v1" "$MOCK_CONFIG6/opencode/plugins/model-variants.ts"'
+assert "patched model-variants.ts filters disabled entries" 'grep -q "disabled" "$MOCK_CONFIG6/opencode/plugins/model-variants.ts"'
+assert "patched model-variants.ts intersects reasoning_options" 'grep -q "reasoning_options" "$MOCK_CONFIG6/opencode/plugins/model-variants.ts"'
+assert "model-variants.ts backup created without marker" '[[ -f "$MOCK_CONFIG6/opencode/plugins/model-variants.ts.bak" ]] && ! grep -q "agy-bridge-mask-v1" "$MOCK_CONFIG6/opencode/plugins/model-variants.ts.bak"'
+assert "purge message references model map v4" 'echo "$OUTPUT_V4" | grep -q "Purged stale agy-bridge entry.*model map v4"'
+assert "stale agy-bridge cache entry purged, other providers kept" '
+  python3 -c "import json; data=json.load(open(\"$MOCK_HOME6/.gentle-ai/cache/model-variants.json\")); assert \"agy-bridge\" not in data and \"openai\" in data"
+'
+
+# Idempotency: second run must not duplicate the marker
+HOME="$MOCK_HOME6" XDG_CONFIG_HOME="$MOCK_CONFIG6" "$INSTALL_SCRIPT" >/dev/null 2>&1 || true
+assert "second run keeps exactly one mask marker" '[[ $(grep -c "agy-bridge-mask-v1" "$MOCK_CONFIG6/opencode/plugins/model-variants.ts") -eq 1 ]]'
+assert "second run reports already-patched" '
+  OUTPUT_V4B=$(HOME="$MOCK_HOME6" XDG_CONFIG_HOME="$MOCK_CONFIG6" "$INSTALL_SCRIPT" 2>&1 || true)
+  echo "$OUTPUT_V4B" | grep -q "already patched"
+'
+
+rm -rf "$TMP_DIR6"
+
+
+# ------------------------------------------------------------------------------
 # Summary
 # ------------------------------------------------------------------------------
 echo "----------------------------------------"

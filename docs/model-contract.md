@@ -43,12 +43,52 @@ acotado `max → thinking` solo cuando `thinking` está declarado para esa base.
 
 ## Versión del mapa y caché
 
-`MODEL_MAP_VERSION = 3` en `plugins/agy-bridge-helpers.ts` invalida cachés
+`MODEL_MAP_VERSION = 4` en `plugins/agy-bridge-helpers.ts` invalida cachés
 de variantes aguas abajo: `install.sh` purga la entrada `agy-bridge` de
 `~/.gentle-ai/cache/model-variants.json` (ese caché unía genéricos
 `{high,low,medium}` en cada fila) y `scripts/sync-models.ts` sella la versión
-en su resultado. El bundle generado preserva el mapa declarado byte por byte
+en su resultado. El bundle generado preserva el mapa enmascarado byte por byte
 (paridad verificada por hash en `plugins/agy-bridge.bundle.test.ts`).
+Detalle del enmascarado en la sección en inglés
+[Effort masking contract](#effort-masking-contract-model-map-v4).
+
+## Effort masking contract (model map v4)
+
+Every reasoning model pre-populates the full generic effort set so the
+runtime merge cannot introduce unmasked entries:
+
+- `GENERIC_EFFORTS = ["high", "medium", "low"]` in
+  `plugins/agy-bridge-helpers.ts`. `thinking` is agy-specific and is never
+  injected by the runtime, so it stays out of the set.
+- Declared efforts (slug-suffix truth) stay enabled as
+  `{reasoningEffort}`. `thinking` is advertised as `reasoningEffort: "max"`
+  (opencode has no `thinking` in its enum) and the bridge maps `max →
+  thinking` back only when `thinking` is declared for that base.
+- Generic-but-undeclared efforts are emitted as exactly
+  `{disabled: true}` — no `reasoningEffort` alongside it.
+- Each reasoning model also carries
+  `reasoning_options: [...declared].sort()`, the machine-readable
+  declared truth for the downstream filter. Singletons (no variants) are
+  untouched: no masking, no `reasoning_options`.
+
+Worked example — `auto-ro-gemini-3.1-pro` declares only `high`/`low`:
+
+```json
+{
+  "high": { "reasoningEffort": "high" },
+  "low": { "reasoningEffort": "low" },
+  "medium": { "disabled": true },
+  "reasoning_options": ["high", "low"]
+}
+```
+
+Downstream, the global `~/.config/opencode/plugins/model-variants.ts`
+cache-writer (patched by `install.sh`, marker `agy-bridge-mask-v1`) drops
+every `{disabled: true}` entry, intersects the survivors with
+`reasoning_options` when present, and skips the row when nothing remains
+(fail-closed: no effort beats a wrong effort). The TUI picker therefore
+shows only declared efforts, every offered pick resolves with 200, and
+`resolveWireModel` keeps its 400 on truly unknown variants as safety net.
 
 ## Snapshot del catálogo y regla de ids
 
