@@ -157,13 +157,18 @@ Deno.test("fetch wrapper: variant maps to suffixed wire model (unit via wireMode
 Deno.test("buildModelMap: enriched shape — reasoningEffort == key except thinking maps to max", () => {
   const grouped = groupBases(FALLBACK_MODELS);
   const map = buildModelMap(grouped);
-  // every variant value must be { reasoningEffort: key }, except the
+  // every ENABLED variant value must be { reasoningEffort: key }, except the
   // thinking Map disposition: opencode's enum has no "thinking" member
   // (spike obs #101), so it is advertised as reasoningEffort "max".
+  // Masked (disabled) entries carry no reasoningEffort by contract (v4).
   for (const [id, def] of Object.entries(map)) {
     const m = def as unknown as { variants: Record<string, unknown>; capabilities?: unknown };
     for (const k of Object.keys(m.variants)) {
       const v = m.variants[k] as Record<string, unknown>;
+      if (v["disabled"] === true) {
+        assertEquals(v, { disabled: true }, `${id} masked variant ${k}`);
+        continue;
+      }
       assertEquals(
         v["reasoningEffort"],
         k === "thinking" ? "max" : k,
@@ -193,7 +198,11 @@ Deno.test("buildModelMap: reasoning true iff variants non-empty", () => {
   const opus = map["auto-ro-claude-opus-4-6"] as unknown as { reasoning?: boolean; capabilities?: unknown; variants: Record<string, unknown> };
   assertEquals(opus.reasoning, true);
   assertEquals(opus.capabilities, undefined);
-  assertEquals(Object.keys(opus.variants), ["thinking"]);
+  // v4 masking: declared thinking stays enabled; undeclared generics masked.
+  assertEquals(opus.variants["thinking"], { reasoningEffort: "max" });
+  assertEquals(opus.variants["high"], { disabled: true });
+  assertEquals(opus.variants["medium"], { disabled: true });
+  assertEquals(opus.variants["low"], { disabled: true });
 });
 
 Deno.test("buildModelMap: thinking variant enriched maps to reasoningEffort max", () => {
@@ -949,7 +958,7 @@ Deno.test("issue-8 unknown variant slug 400: undeclared suffix names base slugs 
 // --- agy-bridge-model-effort-regression Phase 4: versioned cache ---
 // MODEL_MAP_VERSION invalidates stale model-variants.json downstream.
 
-import { MODEL_MAP_VERSION } from "./agy-bridge-helpers.ts";
+import { MODEL_MAP_VERSION, GENERIC_EFFORTS } from "./agy-bridge-helpers.ts";
 
 // --- issue-8-variant-carrier Phase 2b: thinking enum gap (Map disposition) ---
 // Spike obs #101: "thinking" is NOT in opencode's reasoningEffort enum
@@ -1005,8 +1014,8 @@ Deno.test("issue-8 thinking alias: suffix thinking + flat max agree via alias", 
   assertEquals(r, { ok: true, slug: "claude-opus-4-6-thinking" });
 });
 
-Deno.test("4.1 MODEL_MAP_VERSION is 3 (thinking Map disposition changes advertisement)", () => {
-  assertEquals(MODEL_MAP_VERSION, 3);
+Deno.test("4.1 MODEL_MAP_VERSION is 4 (masking contract invalidates v3 caches)", () => {
+  assertEquals(MODEL_MAP_VERSION, 4);
 });
 
 Deno.test("4.3 installer purges stale model-variants.json before resync", () => {
@@ -1015,5 +1024,102 @@ Deno.test("4.3 installer purges stale model-variants.json before resync", () => 
     true,
     "install.sh must invalidate the stale downstream cache",
   );
+});
+
+// --- modelo-agy-efforts-incorrectos Phase 2: explicit variant masking (strict TDD — RED before GREEN) ---
+// Declared-truth contract (spec variant-masking): declared efforts stay
+// {reasoningEffort}; generic-but-undeclared efforts are exactly
+// {disabled:true}; every generic key is pre-populated; model-level
+// reasoning_options carries declared truth (sorted); singletons untouched.
+
+Deno.test("masking 2.1: declared efforts remain enabled with correct reasoningEffort", () => {
+  const grouped = groupBases(["gemini-3.1-pro-high", "gemini-3.1-pro-low"]);
+  const map = buildModelMap(grouped);
+  const m = map["auto-ro-gemini-3.1-pro"] as unknown as {
+    variants: Record<string, unknown>;
+  };
+  assertEquals(m.variants["high"], { reasoningEffort: "high" });
+  assertEquals(m.variants["low"], { reasoningEffort: "low" });
+});
+
+Deno.test("masking 2.1: undeclared generic effort is exactly {disabled:true}", () => {
+  const grouped = groupBases(["gemini-3.1-pro-high", "gemini-3.1-pro-low"]);
+  const map = buildModelMap(grouped);
+  const m = map["auto-ro-gemini-3.1-pro"] as unknown as {
+    variants: Record<string, unknown>;
+  };
+  // Deep-equal on the whole entry: no reasoningEffort may leak into a mask.
+  assertEquals(m.variants["medium"], { disabled: true });
+});
+
+Deno.test("masking 2.1: all generic effort keys pre-populated per reasoning model", () => {
+  const grouped = groupBases(["gemini-3.1-pro-high", "gemini-3.1-pro-low"]);
+  const map = buildModelMap(grouped);
+  const m = map["auto-ro-gemini-3.1-pro"] as unknown as {
+    variants: Record<string, unknown>;
+  };
+  const keys = Object.keys(m.variants);
+  for (const g of ["high", "medium", "low"] as const) {
+    assertEquals(keys.includes(g), true, `generic key ${g} must be present`);
+  }
+});
+
+Deno.test("masking 2.1: reasoning_options lists only declared efforts, sorted", () => {
+  const grouped = groupBases(["gemini-3.1-pro-high", "gemini-3.1-pro-low"]);
+  const map = buildModelMap(grouped);
+  const m = map["auto-ro-gemini-3.1-pro"] as unknown as {
+    reasoning_options: unknown;
+  };
+  assertEquals(m.reasoning_options, ["high", "low"]);
+});
+
+Deno.test("masking 2.1: singletons untouched (no masking, no reasoning_options)", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  const singleton = map["auto-ro-claude-sonnet-4-6"] as unknown as {
+    variants: Record<string, unknown>;
+    reasoning?: boolean;
+    reasoning_options?: unknown;
+  };
+  assertEquals(Object.keys(singleton.variants).length, 0);
+  assertEquals(singleton.reasoning, undefined);
+  assertEquals(singleton.reasoning_options, undefined);
+});
+
+Deno.test("masking 2.1 triangulate: fully-declared model has no masks; rw mirrors ro", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  // gemini-3.7-flash declares the full generic set: zero disabled entries.
+  const flash = map["auto-ro-gemini-3.7-flash"] as unknown as {
+    variants: Record<string, unknown>;
+    reasoning_options: unknown;
+  };
+  assertEquals(flash.variants["high"], { reasoningEffort: "high" });
+  assertEquals(flash.variants["medium"], { reasoningEffort: "medium" });
+  assertEquals(flash.variants["low"], { reasoningEffort: "low" });
+  assertEquals(flash.reasoning_options, ["high", "low", "medium"]);
+  // rw profile mirrors ro exactly for a masked model.
+  const proRo = map["auto-ro-gemini-3.1-pro"] as unknown as Record<string, unknown>;
+  const proRw = map["auto-rw-gemini-3.1-pro"] as unknown as Record<string, unknown>;
+  assertEquals(proRw["variants"], proRo["variants"]);
+  assertEquals(proRw["reasoning_options"], proRo["reasoning_options"]);
+});
+
+Deno.test("masking 2.1 triangulate: thinking model masks generics, keeps max alias", () => {
+  const grouped = groupBases(FALLBACK_MODELS);
+  const map = buildModelMap(grouped);
+  const opus = map["auto-ro-claude-opus-4-6"] as unknown as {
+    variants: Record<string, unknown>;
+    reasoning_options: unknown;
+  };
+  assertEquals(opus.variants["thinking"], { reasoningEffort: "max" });
+  assertEquals(opus.variants["high"], { disabled: true });
+  assertEquals(opus.variants["medium"], { disabled: true });
+  assertEquals(opus.variants["low"], { disabled: true });
+  assertEquals(opus.reasoning_options, ["thinking"]);
+});
+
+Deno.test("masking 2.2: GENERIC_EFFORTS is exactly [high, medium, low]", () => {
+  assertEquals([...GENERIC_EFFORTS], ["high", "medium", "low"]);
 });
 

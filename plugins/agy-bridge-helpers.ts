@@ -3,7 +3,10 @@
 // (e.g. ~/.gentle-ai/cache/model-variants.json) after declared-map changes.
 // v3: thinking Map disposition — variants advertise reasoningEffort "max"
 // for "thinking" (spike obs #101: "thinking" is not in opencode's enum).
-export const MODEL_MAP_VERSION = 3;
+// v4: explicit variant masking — undeclared generic efforts are emitted as
+// {disabled:true} so the runtime merge cannot inject unmasked entries;
+// downstream filters disabled before caching/rendering.
+export const MODEL_MAP_VERSION = 4;
 export const FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
   "gemini-3.7-flash-medium",
@@ -238,7 +241,12 @@ export function resolveWireModel(
   return { ok: true, slug: `${base}-${first}` };
 }
 
-export type VariantSpec = { reasoningEffort: string }
+export type VariantSpec = { reasoningEffort: string } | { disabled: true }
+
+// Generic effort keys the OpenCode runtime injects for `reasoning: true`
+// models. Pre-populating every key blocks unmasked injection by overwrite;
+// "thinking" is agy-specific and never injected, so it stays out of the set.
+export const GENERIC_EFFORTS = ["high", "medium", "low"] as const
 
 export function buildModelMap(bases: Map<string, Set<string>>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
@@ -249,6 +257,13 @@ export function buildModelMap(bases: Map<string, Set<string>>): Record<string, u
       for (const v of variants) {
         variantMap[v] = { reasoningEffort: v === "thinking" ? "max" : v };
       }
+      if (variants.size > 0) {
+        for (const g of GENERIC_EFFORTS) {
+          if (!(g in variantMap)) {
+            variantMap[g] = { disabled: true };
+          }
+        }
+      }
       out[id] = {
         id,
         name: id,
@@ -257,6 +272,7 @@ export function buildModelMap(bases: Map<string, Set<string>>): Record<string, u
           ? {
               reasoning: true as const,
               interleaved: { field: "reasoning_content" as const },
+              reasoning_options: [...variants].sort(),
             }
           : {}),
         variants: variantMap,
