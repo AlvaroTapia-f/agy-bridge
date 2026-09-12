@@ -18,3 +18,9 @@ if grep -F -- '--allow-read="$HOME/.gemini"' "$file" >/dev/null; then
   echo 'broad ~/.gemini read is forbidden' >&2
   exit 1
 fi
+for forbidden in '--allow-read=/workspace' '--allow-write=/workspace'; do
+  if grep -F -- "$forbidden" "$file" >/dev/null; then
+    echo "workspace Deno filesystem permission is forbidden: $forbidden" >&2
+    exit 1
+  fi
+done

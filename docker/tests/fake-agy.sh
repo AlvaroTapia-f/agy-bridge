@@ -5,6 +5,10 @@ if [[ "${1:-}" == "models" ]]; then
   printf 'gemini-test-high\tGemini Test High\n'
   exit 0
 fi
+if [[ "${1:-}" == "--version" ]]; then
+  printf 'agy 9.9.9\n'
+  exit 0
+fi
 home="${HOME:-/tmp}"
 args_file="${FAKE_AGY_ARGS_FILE:-$home/fake-agy-args.txt}"
 capture_file="${FAKE_AGY_CAPTURE_FILE:-$home/fake-agy-input.ndjson}"
