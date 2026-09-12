@@ -472,6 +472,61 @@ exit 1
   }
 });
 
+Deno.test("Task 6.3: early-closing agy stdin does not mask salvage with BrokenPipe", async () => {
+  const convId = "epipe-salvage-test-conv";
+  const mockScript = `#!/usr/bin/env bash
+if [ "$1" = "models" ]; then
+  printf "gemini-2.5-pro\\tGemini 2.5 Pro\\n"
+  exit 0
+fi
+
+# Deliberately close the read side before the bridge can finish writing a
+# multi-megabyte NDJSON prompt. runAgy must still process stdout/status and
+# salvage the completed response instead of surfacing BrokenPipe as HTTP 500.
+exec 0<&-
+sleep 0.05
+printf '{"event":"result","result":{"status":"ERROR","error":"early stdin close","conversation_id":"${convId}"}}\\n'
+exit 1
+`;
+
+  const harness = await ServiceHarness.create({ mockAgyScript: mockScript });
+  try {
+    const logDir =
+      `${harness.homeDir}/.gemini/antigravity-cli/brain/${convId}/.system_generated/logs`;
+    await Deno.mkdir(logDir, { recursive: true });
+    await Deno.writeTextFile(
+      `${logDir}/transcript_full.jsonl`,
+      JSON.stringify({
+        type: "PLANNER_RESPONSE",
+        content: "Salvaged after early stdin close",
+      }) + "\n",
+    );
+
+    const res = await fetch(
+      `http://127.0.0.1:${harness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gemini-2.5-pro",
+          messages: [{
+            role: "user",
+            content: "x".repeat(4 * 1024 * 1024),
+          }],
+        }),
+      },
+    );
+
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(
+      body.choices[0].message.content,
+      "Salvaged after early stdin close",
+    );
+  } finally {
+    await harness.close();
+  }
+});
 Deno.test("Task 6.3: Retry once as fresh conversation when continued session fails", async () => {
   // We enable AGY_REUSE=on
   // Turn 1 succeeds and establishes conversation 'conv-1'

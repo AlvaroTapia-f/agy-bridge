@@ -1,0 +1,3 @@
+# Keep TypeScript source stable across Windows checkouts and Linux Docker builds.
+*.ts text eol=lf
+*.tsx text eol=lf
