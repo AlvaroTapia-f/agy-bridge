@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 bash -n /app/docker/*.sh /app/docker/tests/*.sh
+if LC_ALL=C grep -q $'\r' /app/docker/workspace/verified-agy-versions.txt; then
+  echo "FAIL: verified agy version allowlist contains CRLF inside the image" >&2
+  exit 1
+fi
 bash /app/docker/tests/test-secrets.sh
 bash /app/docker/tests/test-keyring.sh
 bash /app/docker/tests/test-workspace-policy.sh /app/docker/workspace-policy.sh
