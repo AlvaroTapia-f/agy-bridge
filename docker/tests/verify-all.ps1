@@ -488,12 +488,12 @@ function Get-WorkspaceFingerprint {
   $root = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
   $entries = @()
   foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File | Sort-Object FullName)) {
-    $relative = $file.FullName.Substring($root.Length).TrimStart('\\', '/')
+    $relative = $file.FullName.Substring($root.Length).TrimStart([char[]]@('\', '/'))
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash
     $entries += "FILE|$relative|$($file.Length)|$($file.LastWriteTimeUtc.Ticks)|$hash"
   }
   foreach ($dir in @(Get-ChildItem -LiteralPath $root -Recurse -Directory | Sort-Object FullName)) {
-    $relative = $dir.FullName.Substring($root.Length).TrimStart('\\', '/')
+    $relative = $dir.FullName.Substring($root.Length).TrimStart([char[]]@('\', '/'))
     $entries += "DIR|$relative|$($dir.LastWriteTimeUtc.Ticks)"
   }
   return $entries -join "`n"
