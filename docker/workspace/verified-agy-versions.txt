@@ -3,3 +3,4 @@
 #
 # Do not add a version based on unit/static tests alone. Workspace mode must
 # fail closed for every version not listed here.
+1.2.2
