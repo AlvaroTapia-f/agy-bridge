@@ -18,9 +18,15 @@ try {
   $mount = $workspaceMounts[0]
   if ($mount.type -ne 'bind') { throw '/workspace must be a bind mount' }
   if ($mount.read_only -ne $true) { throw '/workspace bind must be read-only' }
+  # Compose may omit an explicit false value from resolved JSON. Lock the
+  # source declaration and, when the resolved field is present, require false.
+  $workspaceComposeSource = Get-Content -LiteralPath 'compose.workspace.yaml' -Raw
+  if ($workspaceComposeSource -notmatch '(?m)^\s*create_host_path:\s*false\s*$') {
+    throw 'compose.workspace.yaml must declare bind.create_host_path: false'
+  }
   $createHostPath = $mount.bind.PSObject.Properties['create_host_path']
-  if ($null -eq $createHostPath -or $createHostPath.Value -ne $false) {
-    throw '/workspace bind.create_host_path must be false'
+  if ($null -ne $createHostPath -and $createHostPath.Value -ne $false) {
+    throw '/workspace resolved bind.create_host_path must not be true'
   }
 
   if ($bridge.environment.AGY_WORKSPACE_ROOT -ne '/workspace') { throw 'AGY_WORKSPACE_ROOT must be /workspace' }
