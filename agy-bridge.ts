@@ -55,6 +55,39 @@ const STATE_DIR = Deno.env.get("STATE_DIR") ??
   `${Deno.env.get("HOME")}/.local/state/agy-bridge`;
 const USAGE_LOG = `${STATE_DIR}/usage.jsonl`;
 
+type WorkspaceMode = "ro";
+
+interface WorkspaceConfig {
+  root: "/workspace";
+  mode: WorkspaceMode;
+}
+
+function loadWorkspaceConfig(): WorkspaceConfig | null {
+  const root = Deno.env.get("AGY_WORKSPACE_ROOT");
+  const mode = Deno.env.get("AGY_WORKSPACE_MODE");
+  if (!root && !mode) return null;
+  if (root !== "/workspace") {
+    throw new Error("AGY_WORKSPACE_ROOT must be /workspace");
+  }
+  if (mode !== "ro") {
+    throw new Error("AGY_WORKSPACE_MODE must be ro");
+  }
+  if (MAX_CONCURRENT !== 1) {
+    throw new Error("workspace mode requires MAX_CONCURRENT=1");
+  }
+  return { root, mode };
+}
+
+const WORKSPACE = loadWorkspaceConfig();
+const WORKSPACE_AGENT = "agy-bridge-worker-ro-v1";
+const WORKSPACE_CONTRACT = `# Bridge workspace contract
+
+The operator explicitly exposed one caller project at /workspace in read-only mode.
+Treat /workspace as the caller project root.
+Do not treat /app, HOME, the bridge process directory, bridge state, configuration, keyring data, or secrets as caller project files.
+Use project filesystem tools only within /workspace.
+The workspace is read-only. Never create, modify, delete, or execute project files.`;
+
 // ---------- autonomous delegation (models prefixed "auto-<profile>-") ----------
 //
 // "auto-ro-gemini-3.7-flash-high" runs ONE agy session with the profile's own
@@ -117,6 +150,26 @@ function childEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(Deno.env.toObject())) {
     if (!CHILD_ENV_BLOCKLIST.has(k)) env[k] = v;
+  }
+  return env;
+}
+
+const WORKSPACE_CHILD_ENV_ALLOWLIST = [
+  "HOME",
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "XDG_RUNTIME_DIR",
+] as const;
+
+function workspaceChildEnv(): Record<string, string> {
+  const source = Deno.env.toObject();
+  const env: Record<string, string> = {};
+  for (const key of WORKSPACE_CHILD_ENV_ALLOWLIST) {
+    const value = source[key];
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }
@@ -388,8 +441,12 @@ When finished, your final message must be the complete deliverable requested:
 self-contained and ready to be consumed by an orchestrator without further
 context.`;
 
-function renderAutonomousPrompt(req: OAIChatRequest): RenderedPrompt {
+function renderAutonomousPrompt(
+  req: OAIChatRequest,
+  trustedSystem?: string,
+): RenderedPrompt {
   const system: string[] = [];
+  if (trustedSystem) system.push(trustedSystem);
   for (const m of req.messages ?? []) {
     if (m.role === "system") {
       const text = textContent(m).trim();
@@ -609,6 +666,11 @@ interface AgyStreamHandlers {
   evict?: () => void;
 }
 
+interface AgyExecutionContext {
+  cwd?: string;
+  workspaceReadOnly?: boolean;
+}
+
 async function runAgy(
   model: string,
   prompt: string,
@@ -616,6 +678,7 @@ async function runAgy(
   signal?: AbortSignal,
   conversationId?: string,
   agent: string = AGY_AGENT,
+  execution: AgyExecutionContext = {},
 ): Promise<AgyResult> {
   const release = await acquire();
   const started = Date.now();
@@ -644,7 +707,8 @@ async function runAgy(
       stdout: "piped",
       stderr: "piped",
       stdin: "piped",
-      env: childEnv(),
+      cwd: execution.cwd,
+      env: execution.workspaceReadOnly ? workspaceChildEnv() : childEnv(),
       clearEnv: true,
     }).spawn();
 
@@ -925,10 +989,21 @@ async function handleAutonomousChat(
   modelStr: string,
   auto: AutoRoute,
 ): Promise<Response> {
-  const prepared = renderAutonomousPrompt(body);
+  const workspaceReadOnly = WORKSPACE !== null && auto.profile === "ro";
+  const selectedAgent = workspaceReadOnly ? WORKSPACE_AGENT : auto.agent;
+  const execution: AgyExecutionContext = workspaceReadOnly
+    ? { cwd: WORKSPACE.root, workspaceReadOnly: true }
+    : {};
+  const prepared = renderAutonomousPrompt(
+    body,
+    workspaceReadOnly ? WORKSPACE_CONTRACT : undefined,
+  );
   const log = {
     autonomous: auto.profile,
-    agent: auto.agent,
+    agent: selectedAgent,
+    ...(workspaceReadOnly
+      ? { workspace_enabled: true, workspace_mode: "ro", workspace_root: "/workspace" }
+      : {}),
     msgs: body.messages?.length ?? 0,
     prompt_chars: prepared.prompt.length,
     tools_chars: 0,
@@ -946,7 +1021,8 @@ async function handleAutonomousChat(
       { log },
       req.signal,
       undefined,
-      auto.agent,
+      selectedAgent,
+      execution,
     );
     if (!r.ok) return jsonError(502, r.error ?? "agy failed");
     return Response.json({
@@ -1003,7 +1079,7 @@ async function handleAutonomousChat(
         const r = await runAgy(auto.real, streamingPrompt, {
           onDelta: (kind, d) => classifier.onDelta(kind, d),
           log,
-        }, req.signal, undefined, auto.agent);
+        }, req.signal, undefined, selectedAgent, execution);
         classifier.flush();
         if (!r.ok) {
           send({ error: { message: r.error ?? "agy failed", code: 502 } });
@@ -1064,6 +1140,12 @@ async function handleChat(req: Request): Promise<Response> {
   if (!model) return jsonError(400, "missing model");
   const auto = parseAutoModel(model);
   if (auto) {
+    if (WORKSPACE && auto.profile === "rw") {
+      return jsonError(
+        403,
+        "workspace is read-only; read-write host workspace support is not enabled",
+      );
+    }
     const declared = groupBases(modelSlugs);
     // All accepted body signals (flat reasoning_effort, nested
     // reasoning.effort, variant) funnel through variantSignals; the slug

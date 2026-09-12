@@ -16,6 +16,7 @@ RUN apt-get update \
 
 RUN groupadd --gid 10001 agy \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash agy \
+ && install -d -m 0755 -o agy -g agy /workspace \
  && install -d -m 0700 -o agy -g agy /home/agy/.cache \
  && install -d -m 0700 -o agy -g agy \
       /home/agy/.cache/deno \
