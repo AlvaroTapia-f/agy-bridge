@@ -170,7 +170,7 @@ assert_eq "$count_after" "$count_before"
 code="$(curl -sS -o "$work/child-failure.json" -w '%{http_code}' \
   -H 'content-type: application/json' \
   -H "Authorization: Bearer $AGY_TOKEN" \
-  -d '{"model":"auto-ro-gemini-test","messages":[{"role":"user","content":"FAKE_CHILD_FAILURE"}]}' \
+  -d '{"model":"auto-ro-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"FAKE_CHILD_FAILURE"}]}' \
   http://127.0.0.1:17422/v1/chat/completions)"
 assert_eq "$code" 502
 [[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "workspace policy backup remained after child failure"
@@ -184,7 +184,7 @@ start_bridge 17423
 code="$(curl -sS -o "$work/hard-deadline.json" -w '%{http_code}' \
   -H 'content-type: application/json' \
   -H "Authorization: Bearer $AGY_TOKEN" \
-  -d '{"model":"auto-ro-gemini-test","messages":[{"role":"user","content":"FAKE_HANG"}]}' \
+  -d '{"model":"auto-ro-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"FAKE_HANG"}]}' \
   http://127.0.0.1:17423/v1/chat/completions)"
 assert_eq "$code" 502
 [[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "workspace policy backup remained after hard deadline"
