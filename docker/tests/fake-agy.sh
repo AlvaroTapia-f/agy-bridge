@@ -27,5 +27,17 @@ printf '%s\n' "$((count + 1))" > "$count_file"
 # Drain it so the writer cannot hit EPIPE if the fake exits too early.
 input="$(cat || true)"
 printf '%s\n' "$input" > "$capture_file"
+
+if [[ "$input" == *'FAKE_CHILD_FAILURE'* ]]; then
+  printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"fake child failure","conversation_id":"fake-conversation"}}'
+  exit 1
+fi
+
+if [[ "$input" == *'FAKE_HANG'* ]]; then
+  trap '' TERM
+  sleep 30
+  exit 1
+fi
+
 printf '%s\n' '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"fake reply"}}'
 printf '%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"fake reply","conversation_id":"fake-conversation","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}'

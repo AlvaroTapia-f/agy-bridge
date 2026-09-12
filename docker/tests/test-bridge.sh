@@ -23,7 +23,7 @@ start_bridge() {
   deno run \
     --allow-net="127.0.0.1:$port" \
     --allow-env \
-    --allow-run="$AGY_BIN" \
+    --allow-run="$AGY_BIN,/app/docker/workspace-policy.sh" \
     --allow-read="$HOME/.gemini/antigravity-cli/brain" \
     --allow-write="$STATE_DIR" \
     /app/agy-bridge.ts >"$work/bridge-$port.out" 2>"$work/bridge-$port.err" &
@@ -108,7 +108,7 @@ assert_workspace_config_rejected() {
     deno run \
       --allow-net=127.0.0.1:17429 \
       --allow-env \
-      --allow-run="$AGY_BIN" \
+      --allow-run="$AGY_BIN,/app/docker/workspace-policy.sh" \
       --allow-read="$HOME/.gemini/antigravity-cli/brain" \
       --allow-write="$STATE_DIR" \
       /app/agy-bridge.ts >"$work/reject-$name.out" 2>"$work/reject-$name.err"; then
@@ -164,6 +164,31 @@ code="$(curl -sS -o "$work/rw-denied.json" -w '%{http_code}' \
 assert_eq "$code" 403
 count_after="$(cat "$HOME/fake-agy-count.txt")"
 assert_eq "$count_after" "$count_before"
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "workspace policy backup remained after successful request"
+
+# A child-side failure must still restore the policy transaction.
+code="$(curl -sS -o "$work/child-failure.json" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-ro-gemini-test","messages":[{"role":"user","content":"FAKE_CHILD_FAILURE"}]}' \
+  http://127.0.0.1:17422/v1/chat/completions)"
+assert_eq "$code" 502
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "workspace policy backup remained after child failure"
 stop_bridge
+
+# A hard-deadline path uses a fake child that ignores SIGTERM. The bridge must
+# wait for terminal child status (SIGKILL escalation) before restoring policy.
+export PRINT_TIMEOUT=1ms
+export AGY_HARD_MARGIN_MS=50
+start_bridge 17423
+code="$(curl -sS -o "$work/hard-deadline.json" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-ro-gemini-test","messages":[{"role":"user","content":"FAKE_HANG"}]}' \
+  http://127.0.0.1:17423/v1/chat/completions)"
+assert_eq "$code" 502
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "workspace policy backup remained after hard deadline"
+stop_bridge
+unset PRINT_TIMEOUT AGY_HARD_MARGIN_MS
 
 echo "PASS: bridge default regression and explicit read-only workspace runtime"

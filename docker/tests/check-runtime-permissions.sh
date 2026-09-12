@@ -10,6 +10,10 @@ grep -F -- '--allow-read="$HOME/.gemini/antigravity-cli/brain"' "$file" >/dev/nu
   echo 'missing scoped transcript read permission' >&2
   exit 1
 }
+grep -F -- '/app/docker/workspace-policy.sh' "$file" >/dev/null || {
+  echo 'missing exact workspace policy helper run permission' >&2
+  exit 1
+}
 if grep -E -- '^[[:space:]]*--allow-net[[:space:]]*\\?$' "$file" >/dev/null; then
   echo 'bare --allow-net is forbidden' >&2
   exit 1

@@ -3,6 +3,7 @@ set -euo pipefail
 
 /app/docker/init-secrets.sh
 AGY_SECRETS_DIR="${AGY_SECRETS_DIR:-/home/agy/.local/share/agy-secrets}"
+STATE_DIR="${STATE_DIR:-/home/agy/.local/state/agy-bridge}"
 bridge_token_file="$AGY_SECRETS_DIR/bridge_token"
 keyring_password_file="$AGY_SECRETS_DIR/keyring_password"
 verified_versions_file="/app/docker/workspace/verified-agy-versions.txt"
@@ -17,6 +18,11 @@ AGY_TOKEN="$(cat "$bridge_token_file")"
 }
 export AGY_TOKEN
 export KEYRING_PASSWORD_FILE="$keyring_password_file"
+export STATE_DIR
+
+# Recover a transaction left behind by an abrupt prior workspace run. This is
+# also required when returning to the default no-workspace deployment.
+/app/docker/workspace-policy.sh restore-if-needed
 
 workspace_enabled=false
 if [[ -n "${AGY_WORKSPACE_ROOT:-}" || -n "${AGY_WORKSPACE_MODE:-}" ]]; then
@@ -97,7 +103,7 @@ exec /app/docker/keyring-session.sh bash -lc '
   exec deno run \
     --allow-net=0.0.0.0:7421 \
     --allow-env \
-    --allow-run="$AGY_BIN" \
+    --allow-run="$AGY_BIN,/app/docker/workspace-policy.sh" \
     --allow-read="$HOME/.gemini/antigravity-cli/brain" \
     --allow-write="$STATE_DIR" \
     /app/agy-bridge.ts

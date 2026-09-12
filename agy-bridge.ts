@@ -80,6 +80,7 @@ function loadWorkspaceConfig(): WorkspaceConfig | null {
 
 const WORKSPACE = loadWorkspaceConfig();
 const WORKSPACE_AGENT = "agy-bridge-worker-ro-v1";
+const WORKSPACE_POLICY_HELPER = "/app/docker/workspace-policy.sh";
 const WORKSPACE_CONTRACT = `# Bridge workspace contract
 
 The operator explicitly exposed one caller project at /workspace in read-only mode.
@@ -671,6 +672,26 @@ interface AgyExecutionContext {
   workspaceReadOnly?: boolean;
 }
 
+async function runWorkspacePolicy(action: "apply-ro" | "restore"): Promise<void> {
+  const child = new Deno.Command(WORKSPACE_POLICY_HELPER, {
+    args: [action],
+    stdout: "piped",
+    stderr: "piped",
+    stdin: "null",
+    env: childEnv(),
+    clearEnv: true,
+  }).spawn();
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.status,
+  ]);
+  if (!status.success) {
+    const detail = stderr.trim() || stdout.trim() || `exit code ${status.code}`;
+    throw new Error(`${action} failed: ${detail}`);
+  }
+}
+
 async function runAgy(
   model: string,
   prompt: string,
@@ -687,8 +708,15 @@ async function runAgy(
   let watchdog: ReturnType<typeof setTimeout> | null = null;
   let onAbort: (() => void) | null = null;
   let abortListenerAdded = false;
+  let workspacePolicyApplied = false;
+  let workspaceChildStatus: Promise<Deno.CommandStatus> | null = null;
+  let workspaceChildKill: (() => void) | null = null;
 
   try {
+    if (execution.workspaceReadOnly) {
+      await runWorkspacePolicy("apply-ro");
+      workspacePolicyApplied = true;
+    }
     const args = [
       "--agent",
       agent,
@@ -717,6 +745,7 @@ async function runAgy(
     // agy keeps stdin open but never reads it.
     const stderrText = new Response(child.stderr).text().catch(() => "");
     const statusPromise = child.status;
+    if (execution.workspaceReadOnly) workspaceChildStatus = statusPromise;
     let exited = false;
     let escalateTimer: ReturnType<typeof setTimeout> | null = null;
     const clearEscalation = () => {
@@ -734,9 +763,9 @@ async function runAgy(
         child.kill("SIGTERM");
       } catch { /* already dead */ }
       if (escalateTimer === null) {
-        // This timer intentionally survives runAgy's outer finally. A child
-        // that ignores SIGTERM still needs SIGKILL after the request gate is
-        // released; child.status owns cancellation when the process exits.
+        // Default runs may release their request gate before this escalation.
+        // Workspace runs wait for child.status before restoring policy and
+        // releasing the concurrency slot.
         escalateTimer = setTimeout(() => {
           if (!exited) {
             try {
@@ -746,6 +775,7 @@ async function runAgy(
         }, 3_000);
       }
     };
+    if (execution.workspaceReadOnly) workspaceChildKill = killHard;
 
     let resolveAbort: ((value: "aborted") => void) | null = null;
     const abortPromise = signal
@@ -909,6 +939,27 @@ async function runAgy(
     if (watchdog !== null) clearTimeout(watchdog);
     if (signal && onAbort && abortListenerAdded) {
       signal.removeEventListener("abort", onAbort);
+    }
+    if (workspacePolicyApplied && workspaceChildStatus) {
+      workspaceChildKill?.();
+      try {
+        await workspaceChildStatus;
+      } catch {
+        // The containment invariant needs terminal process state, not a
+        // successful exit code. runAgy records the actual request failure.
+      }
+    }
+    if (workspacePolicyApplied) {
+      try {
+        await runWorkspacePolicy("restore");
+      } catch (e) {
+        result.ok = false;
+        result.text = "";
+        result.error = `workspace policy restore failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`;
+        console.error("workspace policy restore failed");
+      }
     }
     release();
     const dur = (Date.now() - started) / 1000;

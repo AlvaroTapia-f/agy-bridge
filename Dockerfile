@@ -10,6 +10,7 @@ RUN apt-get update \
       dbus \
       dbus-x11 \
       gnome-keyring \
+      jq \
       libsecret-tools \
       tini \
  && rm -rf /var/lib/apt/lists/*
