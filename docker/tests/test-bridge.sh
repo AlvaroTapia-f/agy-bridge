@@ -3,7 +3,7 @@ set -euo pipefail
 source /app/docker/tests/assert.sh
 
 work="$(mktemp -d)"
-trap 'kill ${bridge_pid:-0} 2>/dev/null || true; rm -rf "$work"' EXIT
+trap 'if [[ ${bridge_pid:-0} -gt 0 ]]; then kill "$bridge_pid" 2>/dev/null || true; fi; rm -rf "$work"' EXIT
 
 export AGY_BIN=/app/docker/tests/fake-agy.sh
 export AGY_TOKEN=0123456789abcdef0123456789abcdef0123456789abcdef
