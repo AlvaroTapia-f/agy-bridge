@@ -63,7 +63,7 @@ apply_ro() {
   updated="$(jq '
     .allowNonWorkspaceAccess = false
     | .trustedWorkspaces = ["/workspace"]
-    | .toolPermission = "strict"
+    | .toolPermission = "request-review"
     | .permissions = {
         allow: ["read_file(/workspace)"],
         deny: [

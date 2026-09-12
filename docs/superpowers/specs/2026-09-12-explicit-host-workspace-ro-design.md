@@ -359,7 +359,7 @@ RO policy:
 {
   "allowNonWorkspaceAccess": false,
   "trustedWorkspaces": ["/workspace"],
-  "toolPermission": "strict",
+  "toolPermission": "request-review",
   "permissions": {
     "allow": [
       "read_file(/workspace)"
@@ -380,7 +380,12 @@ RO policy:
 }
 ```
 
-No wildcard permission appears in either allow or deny lists.
+No wildcard permission appears in either allow or deny lists. `request-review`
+is intentional for `agy 1.2.2`: headless workspace reads are auto-approved only
+in the default review mode; `strict` converts `view_file`'s `read_file` request
+into an unanswerable approval prompt and therefore a soft denial. Containment
+still comes from the dedicated read-only agent, explicit path allow/deny rules,
+`allowNonWorkspaceAccess=false`, and the Docker read-only filesystem/mount.
 
 The policy helper may inspect settings, but it must never inspect, copy, print,
 or transform Google OAuth access/refresh tokens or the bridge Bearer token.

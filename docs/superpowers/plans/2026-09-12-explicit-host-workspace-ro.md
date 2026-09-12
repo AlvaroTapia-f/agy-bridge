@@ -605,7 +605,7 @@ The helper must set:
 {
   "allowNonWorkspaceAccess": false,
   "trustedWorkspaces": ["/workspace"],
-  "toolPermission": "strict",
+  "toolPermission": "request-review",
   "permissions": {
     "allow": ["read_file(/workspace)"],
     "deny": [
@@ -624,7 +624,11 @@ The helper must set:
 }
 ```
 
-No wildcard rule is permitted.
+No wildcard rule is permitted. For `agy 1.2.2`, `request-review` is required for
+headless workspace reads: `strict` turns `view_file`/`read_file` into an
+approval request that headless mode auto-denies. The dedicated read-only agent,
+explicit path policy, `allowNonWorkspaceAccess=false`, and Docker RO boundaries
+remain the containment controls.
 
 - [ ] **Step 5: Implement restore semantics**
 

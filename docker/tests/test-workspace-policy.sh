@@ -30,7 +30,7 @@ run_case() {
   jq -e '
     .allowNonWorkspaceAccess == false and
     .trustedWorkspaces == ["/workspace"] and
-    .toolPermission == "strict" and
+    .toolPermission == "request-review" and
     .permissions.allow == ["read_file(/workspace)"] and
     (.permissions.deny | index("read_file(/app)")) != null and
     (.permissions.deny | index("write_file(/home/agy/.local/state/agy-bridge)")) != null
