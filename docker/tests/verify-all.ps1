@@ -483,13 +483,30 @@ function Invoke-WorkspaceDockerCapture {
   return Invoke-DockerCapture -ArgumentList @($prefix + $ArgumentList) -AllowFailure:$AllowFailure -Quiet:$Quiet
 }
 
+function Get-Sha256Hex {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $stream = [System.IO.File]::OpenRead($Path)
+  try {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+      return ([System.BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '')
+    }
+    finally {
+      $sha.Dispose()
+    }
+  }
+  finally {
+    $stream.Dispose()
+  }
+}
+
 function Get-WorkspaceFingerprint {
   param([Parameter(Mandatory = $true)][string]$Path)
   $root = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
   $entries = @()
   foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File | Sort-Object FullName)) {
     $relative = $file.FullName.Substring($root.Length).TrimStart([char[]]@('\', '/'))
-    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash
+    $hash = Get-Sha256Hex -Path $file.FullName
     $entries += "FILE|$relative|$($file.Length)|$($file.LastWriteTimeUtc.Ticks)|$hash"
   }
   foreach ($dir in @(Get-ChildItem -LiteralPath $root -Recurse -Directory | Sort-Object FullName)) {
