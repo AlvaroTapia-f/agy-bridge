@@ -1,18 +1,30 @@
 # PR #3 Explicit Read-Only Host Workspace Support Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:subagent-driven-development or superpowers:executing-plans to
+> implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
-**Goal:** Add one explicit read-only host project workspace for Docker `auto-ro-*` requests without enabling host writes or weakening PR #2 OAuth, network, or default behavior.
+**Goal:** Add one explicit read-only host project workspace for Docker
+`auto-ro-*` requests without enabling host writes or weakening PR #2 OAuth,
+network, or default behavior.
 
-**Architecture:** Default `compose.yaml` remains workspace-free. `compose.workspace.yaml` mounts one operator-selected project at `/workspace:ro`; workspace `auto-ro-*` uses a dedicated read-only agent, sanitized child environment, explicit `/workspace` CWD, and a transactional Antigravity containment policy. `auto-rw-*` is rejected with HTTP 403 in workspace mode. Read-write workspace support is deferred to PR #4.
+**Architecture:** Default `compose.yaml` remains workspace-free.
+`compose.workspace.yaml` mounts one operator-selected project at
+`/workspace:ro`; workspace `auto-ro-*` uses a dedicated read-only agent,
+sanitized child environment, explicit `/workspace` CWD, and a transactional
+Antigravity containment policy. `auto-rw-*` is rejected with HTTP 403 in
+workspace mode. Read-write workspace support is deferred to PR #4.
 
-**Tech Stack:** Deno 2.9.x, TypeScript, Bash, jq, Docker Compose v2, PowerShell, official Google Antigravity `agy` CLI.
+**Tech Stack:** Deno 2.9.x, TypeScript, Bash, jq, Docker Compose v2, PowerShell,
+official Google Antigravity `agy` CLI.
 
-**Spec:** `docs/superpowers/specs/2026-09-12-explicit-host-workspace-ro-design.md`
+**Spec:**
+`docs/superpowers/specs/2026-09-12-explicit-host-workspace-ro-design.md`
 
 ## Global Constraints
 
-- Base must contain PR #2 merge commit `471c32a77c407ee311aa04b7e465e0c1fce4ca71`.
+- Base must contain PR #2 merge commit
+  `471c32a77c407ee311aa04b7e465e0c1fce4ca71`.
 - One workspace per deployment only.
 - Workspace target is exactly `/workspace`.
 - PR #3 is read-only host workspace only.
@@ -20,13 +32,16 @@
 - `auto-rw-*` returns 403 in workspace mode before `agy` spawn.
 - Default `compose.yaml` remains no-workspace.
 - Host path never enters the HTTP API or model prompt.
-- No `read_file(*)`, `write_file(*)`, `command(*)`, or `--dangerously-skip-permissions`.
+- No `read_file(*)`, `write_file(*)`, `command(*)`, or
+  `--dangerously-skip-permissions`.
 - No Deno `--allow-read=/workspace` or `--allow-write=/workspace`.
-- No Docker socket, privileged mode, host networking, host root mount, or user-profile mount.
+- No Docker socket, privileged mode, host networking, host root mount, or
+  user-profile mount.
 - Official `agy` remains the only Google-facing process.
 - Existing OAuth/keyring/secrets/state named volumes remain.
 - Loopback API remains `127.0.0.1:7421`.
-- Default/native behavior remains unchanged when workspace configuration is absent.
+- Default/native behavior remains unchanged when workspace configuration is
+  absent.
 
 ---
 
@@ -34,14 +49,17 @@
 
 **Files:**
 
-- Create: `docs/superpowers/specs/2026-09-12-explicit-host-workspace-ro-design.md`
+- Create:
+  `docs/superpowers/specs/2026-09-12-explicit-host-workspace-ro-design.md`
 - Create: `docs/superpowers/plans/2026-09-12-explicit-host-workspace-ro.md`
 - Create: `docs/superpowers/plans/2026-09-12-read-write-host-workspace-pr4.md`
 
 **Interfaces:**
 
-- Consumes: merged PR #2 Docker OAuth architecture and the original PR #3 planning note.
-- Produces: approved RO-only PR #3 contract and preserved RW PR #4 follow-up plan.
+- Consumes: merged PR #2 Docker OAuth architecture and the original PR #3
+  planning note.
+- Produces: approved RO-only PR #3 contract and preserved RW PR #4 follow-up
+  plan.
 
 - [ ] **Step 1: Verify the branch contains PR #2**
 
@@ -59,7 +77,8 @@ Copy the reviewed design and this plan into the exact paths above.
 
 - [ ] **Step 4: Add the preserved PR #4 plan**
 
-The PR #4 file must explicitly state that implementation cannot begin until PR #3 is merged and the RW containment spike passes.
+The PR #4 file must explicitly state that implementation cannot begin until PR
+#3 is merged and the RW containment spike passes.
 
 - [ ] **Step 5: Commit**
 
@@ -83,9 +102,11 @@ git commit -m "docs: define read-only host workspace boundary"
 
 **Interfaces:**
 
-- Consumes: `AGY_WORKSPACE_ROOT`, `AGY_WORKSPACE_MODE` from the future Compose override.
+- Consumes: `AGY_WORKSPACE_ROOT`, `AGY_WORKSPACE_MODE` from the future Compose
+  override.
 - Produces:
-  - `WorkspaceConfig | null` where valid workspace root is exactly `/workspace` and mode is exactly `ro`;
+  - `WorkspaceConfig | null` where valid workspace root is exactly `/workspace`
+    and mode is exactly `ro`;
   - workspace `auto-ro-*` execution with CWD `/workspace`;
   - workspace `auto-rw-*` HTTP 403;
   - workspace-specific child environment allowlist;
@@ -93,7 +114,8 @@ git commit -m "docs: define read-only host workspace boundary"
 
 - [ ] **Step 1: Add failing fake-agy observability**
 
-Extend `docker/tests/fake-agy.sh` so tests can capture current working directory and selected environment names:
+Extend `docker/tests/fake-agy.sh` so tests can capture current working directory
+and selected environment names:
 
 ```bash
 if [[ -n "${FAKE_AGY_CWD_FILE:-}" ]]; then
@@ -115,11 +137,14 @@ While the Dockerfile is still running as root, create:
 /workspace
 ```
 
-owned by UID/GID `10001` with mode `0755`. This directory is only a mount target; production workspace capability is still disabled unless `/proc/self/mountinfo` later proves it is an explicit read-only mount.
+owned by UID/GID `10001` with mode `0755`. This directory is only a mount
+target; production workspace capability is still disabled unless
+`/proc/self/mountinfo` later proves it is an explicit read-only mount.
 
 - [ ] **Step 3: Add failing no-workspace regression assertions**
 
-In `docker/tests/test-bridge.sh`, keep the current launch with no workspace env and assert:
+In `docker/tests/test-bridge.sh`, keep the current launch with no workspace env
+and assert:
 
 ```text
 AUTO profile ro -> --agent worker-ro
@@ -141,7 +166,9 @@ export FAKE_AGY_CWD_FILE="$work/agy-cwd.txt"
 export FAKE_AGY_ENV_FILE="$work/agy-env.txt"
 ```
 
-The deterministic bridge test does not treat the empty directory as a production mount; production startup mount validation is covered separately. The test must assert:
+The deterministic bridge test does not treat the empty directory as a production
+mount; production startup mount validation is covered separately. The test must
+assert:
 
 ```text
 auto-ro selects agy-bridge-worker-ro-v1
@@ -164,7 +191,8 @@ export STATE_DIR="$work/state"
 export AGY_WORKSPACE_HOST_PATH='HOST_PATH_MUST_NOT_REACH_CHILD'
 ```
 
-After the fake workspace child runs, assert its captured environment does not contain:
+After the fake workspace child runs, assert its captured environment does not
+contain:
 
 ```text
 AGY_TOKEN=
@@ -176,7 +204,8 @@ AGY_WORKSPACE_HOST_PATH=
 
 Also assert `HOME` and `PATH` are present.
 
-Expected before implementation: FAIL because current `childEnv()` copies nearly everything.
+Expected before implementation: FAIL because current `childEnv()` copies nearly
+everything.
 
 - [ ] **Step 6: Implement workspace config parsing**
 
@@ -252,7 +281,7 @@ interface AgyExecutionContext {
 Extend `runAgy()` with an optional final argument:
 
 ```ts
-execution: AgyExecutionContext = {}
+execution: AgyExecutionContext = {};
 ```
 
 When constructing `Deno.Command`, use:
@@ -277,7 +306,8 @@ if (auto.profile === "rw") {
 }
 ```
 
-For `auto-ro-*`, choose agent `agy-bridge-worker-ro-v1`, inject the trusted workspace contract, and pass:
+For `auto-ro-*`, choose agent `agy-bridge-worker-ro-v1`, inject the trusted
+workspace contract, and pass:
 
 ```ts
 {
@@ -286,7 +316,8 @@ For `auto-ro-*`, choose agent `agy-bridge-worker-ro-v1`, inject the trusted work
 }
 ```
 
-Default/no-workspace routing keeps `worker-ro` and `worker-rw` exactly as before.
+Default/no-workspace routing keeps `worker-ro` and `worker-rw` exactly as
+before.
 
 - [ ] **Step 10: Add the Docker-specific RO agent**
 
@@ -310,7 +341,8 @@ plugins: []
 ---
 ```
 
-The body must define `/workspace` as the sole caller project and forbid treating `/app`, `$HOME`, bridge state, config, keyring, or secrets as project files.
+The body must define `/workspace` as the sole caller project and forbid treating
+`/app`, `$HOME`, bridge state, config, keyring, or secrets as project files.
 
 - [ ] **Step 11: Sync the new managed agent in Docker startup**
 
@@ -370,7 +402,8 @@ git commit -m "feat: add explicit read-only workspace runtime contract"
 
 - [ ] **Step 1: Write the failing Compose test**
 
-Create `docker/tests/test-compose-workspace.ps1` that sets a disposable absolute path in `$env:TEMP`, assigns it to `AGY_WORKSPACE_HOST_PATH`, and resolves:
+Create `docker/tests/test-compose-workspace.ps1` that sets a disposable absolute
+path in `$env:TEMP`, assigns it to `AGY_WORKSPACE_HOST_PATH`, and resolves:
 
 ```powershell
 docker compose -f compose.yaml -f compose.workspace.yaml config --format json
@@ -396,7 +429,8 @@ helper services have no /workspace mount
 existing named volumes remain present
 ```
 
-Expected before implementation: FAIL because `compose.workspace.yaml` does not exist.
+Expected before implementation: FAIL because `compose.workspace.yaml` does not
+exist.
 
 - [ ] **Step 2: Create `compose.workspace.yaml`**
 
@@ -426,9 +460,12 @@ Do not modify base `compose.yaml` to add any host bind.
 
 - [ ] **Step 3: Add workspace mount validation to startup**
 
-When workspace mode is enabled, validate exact root/mode/concurrency and parse `/proc/self/mountinfo` so an entry whose mountpoint field is `/workspace` contains the `ro` mount option.
+When workspace mode is enabled, validate exact root/mode/concurrency and parse
+`/proc/self/mountinfo` so an entry whose mountpoint field is `/workspace`
+contains the `ro` mount option.
 
-Reject missing mount, `rw`, wrong root, wrong mode, or concurrency other than `1`.
+Reject missing mount, `rw`, wrong root, wrong mode, or concurrency other than
+`1`.
 
 - [ ] **Step 4: Add workspace-agent collision guard**
 
@@ -443,17 +480,21 @@ Do not inspect arbitrary workspace file contents.
 
 - [ ] **Step 5: Add exact version gate**
 
-Create `docker/workspace/verified-agy-versions.txt` initially with comments explaining that only versions proven by the live verifier may be listed.
+Create `docker/workspace/verified-agy-versions.txt` initially with comments
+explaining that only versions proven by the live verifier may be listed.
 
-Startup workspace mode runs `agy --version`, extracts the semantic version, and requires an exact non-comment line match.
+Startup workspace mode runs `agy --version`, extracts the semantic version, and
+requires an exact non-comment line match.
 
 The default deployment does not use this gate.
 
-During deterministic tests, use a temporary test copy of the version file containing the fake CLI version rather than weakening production behavior.
+During deterministic tests, use a temporary test copy of the version file
+containing the fake CLI version rather than weakening production behavior.
 
 - [ ] **Step 6: Extend static runtime-permission checks**
 
-`docker/tests/check-runtime-permissions.sh` must fail if `docker/start-bridge.sh` contains:
+`docker/tests/check-runtime-permissions.sh` must fail if
+`docker/start-bridge.sh` contains:
 
 ```text
 --allow-read=/workspace
@@ -507,8 +548,11 @@ git commit -m "feat: add read-only workspace compose boundary"
 
 **Interfaces:**
 
-- Consumes: Antigravity `settings.json`, `$STATE_DIR`, and explicit workspace execution state.
-- Produces: atomic `apply-ro`, `restore`, and `restore-if-needed` operations that affect only managed settings and always preserve prior presence/value state.
+- Consumes: Antigravity `settings.json`, `$STATE_DIR`, and explicit workspace
+  execution state.
+- Produces: atomic `apply-ro`, `restore`, and `restore-if-needed` operations
+  that affect only managed settings and always preserve prior presence/value
+  state.
 
 - [ ] **Step 1: Add jq to the image**
 
@@ -548,8 +592,10 @@ Expected before implementation: FAIL because helper does not exist.
 1. refuse to overwrite an existing backup;
 2. read settings as `{}` when the file is absent;
 3. record for each managed key whether it was present and its exact value;
-4. write backup under `$STATE_DIR/workspace-policy-backup.json` using a temporary file plus atomic rename;
-5. update only managed keys in settings using a temporary file plus atomic rename.
+4. write backup under `$STATE_DIR/workspace-policy-backup.json` using a
+   temporary file plus atomic rename;
+5. update only managed keys in settings using a temporary file plus atomic
+   rename.
 
 - [ ] **Step 4: Apply the exact RO policy**
 
@@ -582,9 +628,12 @@ No wildcard rule is permitted.
 
 - [ ] **Step 5: Implement restore semantics**
 
-`workspace-policy.sh restore` must restore each managed key to its prior value when previously present and delete it when previously absent, leave unrelated keys untouched, then remove the backup only after settings restoration succeeds.
+`workspace-policy.sh restore` must restore each managed key to its prior value
+when previously present and delete it when previously absent, leave unrelated
+keys untouched, then remove the backup only after settings restoration succeeds.
 
-`restore-if-needed` is a no-op with no backup and otherwise performs the same restoration.
+`restore-if-needed` is a no-op with no backup and otherwise performs the same
+restoration.
 
 A corrupt backup must fail closed and remain on disk for inspection.
 
@@ -617,7 +666,8 @@ After `acquire()` and before workspace child spawn:
 workspace-policy.sh apply-ro
 ```
 
-In the outer `finally`, after the child has reached terminal handling but before releasing the concurrency slot:
+In the outer `finally`, after the child has reached terminal handling but before
+releasing the concurrency slot:
 
 ```text
 workspace-policy.sh restore
@@ -625,13 +675,16 @@ workspace-policy.sh restore
 
 If policy apply fails, do not spawn `agy`.
 
-If restore fails, mark the request failed, log the policy failure without secret content, and keep the backup for startup recovery.
+If restore fails, mark the request failed, log the policy failure without secret
+content, and keep the backup for startup recovery.
 
 No policy helper is invoked for no-workspace requests.
 
 - [ ] **Step 9: Add lifecycle regression tests**
 
-Extend deterministic tests to cover successful workspace request, child failure, aborted request, and hard-deadline path, asserting the policy backup is absent afterward in every path where restoration succeeded.
+Extend deterministic tests to cover successful workspace request, child failure,
+aborted request, and hard-deadline path, asserting the policy backup is absent
+afterward in every path where restoration succeeded.
 
 - [ ] **Step 10: Run tests**
 
@@ -670,12 +723,15 @@ git commit -m "feat: apply transactional workspace read policy"
 
 **Interfaces:**
 
-- Consumes: final production image, existing OAuth volumes, disposable host workspace fixture.
-- Produces: mandatory live proof that host mutation and non-workspace disclosure are blocked for the exact installed `agy` version.
+- Consumes: final production image, existing OAuth volumes, disposable host
+  workspace fixture.
+- Produces: mandatory live proof that host mutation and non-workspace disclosure
+  are blocked for the exact installed `agy` version.
 
 - [ ] **Step 1: Add workspace fixture helpers to `verify-all.ps1`**
 
-Use a unique directory under `[System.IO.Path]::GetTempPath()` outside the repository. Create:
+Use a unique directory under `[System.IO.Path]::GetTempPath()` outside the
+repository. Create:
 
 ```text
 README-fixture.txt
@@ -684,11 +740,13 @@ nested/inspect-me.txt
 
 Record SHA-256 hashes before workspace tests.
 
-Always remove the fixture in `finally` after the workspace Compose stack is stopped.
+Always remove the fixture in `finally` after the workspace Compose stack is
+stopped.
 
 - [ ] **Step 2: Add harmless container-side canaries**
 
-Before workspace requests, create random unique dummy values in these locations using `docker compose exec` as test setup:
+Before workspace requests, create random unique dummy values in these locations
+using `docker compose exec` as test setup:
 
 ```text
 /app/.workspace-app-canary
@@ -699,7 +757,9 @@ Before workspace requests, create random unique dummy values in these locations 
 
 Do not use a real token, password, or credential as a canary.
 
-Also set a bridge-only environment canary in the workspace Compose test invocation and assert it is not present in the workspace child environment through deterministic instrumentation.
+Also set a bridge-only environment canary in the workspace Compose test
+invocation and assert it is not present in the workspace child environment
+through deterministic instrumentation.
 
 - [ ] **Step 3: Start explicit RO workspace deployment**
 
@@ -719,7 +779,8 @@ Capture:
 docker compose -f compose.yaml -f compose.workspace.yaml exec -T agy-bridge agy --version
 ```
 
-The version must be the exact candidate being tested for the final allowlist entry.
+The version must be the exact candidate being tested for the final allowlist
+entry.
 
 - [ ] **Step 5: Verify workspace reads**
 
@@ -729,13 +790,15 @@ Use the selected live model and call:
 auto-ro-<selected model>
 ```
 
-Ask it to read both fixture files and include unique fixture markers in its final answer. Fail if markers are absent.
+Ask it to read both fixture files and include unique fixture markers in its
+final answer. Fail if markers are absent.
 
 - [ ] **Step 6: Verify host project immutability**
 
 Ask the same route to modify, delete, and create files in `/workspace`.
 
-After the request, recompute host hashes and list directory entries. Require exact equality with the pre-test state.
+After the request, recompute host hashes and list directory entries. Require
+exact equality with the pre-test state.
 
 - [ ] **Step 7: Verify auto-rw denial**
 
@@ -743,7 +806,8 @@ Call `auto-rw-<selected model>` and require HTTP 403 with no project mutation.
 
 - [ ] **Step 8: Verify non-workspace canary denial**
 
-Make separate `auto-ro-*` requests asking for each dummy canary value by absolute path and by traversal path where applicable.
+Make separate `auto-ro-*` requests asking for each dummy canary value by
+absolute path and by traversal path where applicable.
 
 Fail if any response contains the unique canary value from:
 
@@ -754,19 +818,26 @@ agy-secrets
 keyring storage
 ```
 
-Also request `/workspace/../app/.workspace-app-canary` and require no canary disclosure.
+Also request `/workspace/../app/.workspace-app-canary` and require no canary
+disclosure.
 
 - [ ] **Step 9: Preserve PR #2 security/persistence gates**
 
-After workspace gates, run existing Host/Bearer checks and persistence transitions. OAuth, bridge token, bridge state, loopback publication, restart, down/up, recreation, rebuild, and Docker Desktop restart gates must continue to pass.
+After workspace gates, run existing Host/Bearer checks and persistence
+transitions. OAuth, bridge token, bridge state, loopback publication, restart,
+down/up, recreation, rebuild, and Docker Desktop restart gates must continue to
+pass.
 
 - [ ] **Step 10: Add verifier policy lock**
 
-Extend `docker/tests/check-verify-all-policy.sh` so it fails if the mandatory workspace gates are removed from `verify-all.ps1`.
+Extend `docker/tests/check-verify-all-policy.sh` so it fails if the mandatory
+workspace gates are removed from `verify-all.ps1`.
 
-- [ ] **Step 11: Run the full verifier with the candidate version staged in the allowlist**
+- [ ] **Step 11: Run the full verifier with the candidate version staged in the
+      allowlist**
 
-Stage the exact installed version in `docker/workspace/verified-agy-versions.txt`, then run:
+Stage the exact installed version in
+`docker/workspace/verified-agy-versions.txt`, then run:
 
 ```powershell
 $HEAD = (git rev-parse HEAD).Trim()
@@ -777,7 +848,8 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 The run is valid only without `-SkipLive` and without `-SkipDockerRestart`.
 
-If any containment canary is disclosed, remove the staged version entry and do not commit this task.
+If any containment canary is disclosed, remove the staged version entry and do
+not commit this task.
 
 - [ ] **Step 12: Commit only after full PASS**
 
@@ -816,7 +888,8 @@ docker compose `
   up -d
 ```
 
-State that the path must point only to the intended project directory and must not be `C:\`, a user profile, Docker Desktop storage, or another broad path.
+State that the path must point only to the intended project directory and must
+not be `C:\`, a user profile, Docker Desktop storage, or another broad path.
 
 - [ ] **Step 2: Document routing behavior**
 
@@ -830,7 +903,10 @@ ordinary/bare models -> no host workspace capability is implied
 
 - [ ] **Step 3: Document version gating**
 
-Explain that an image rebuild can install a newer official `agy`, and workspace mode intentionally refuses to start until that exact version passes the repository's live containment verifier and is added to the verified-version file.
+Explain that an image rebuild can install a newer official `agy`, and workspace
+mode intentionally refuses to start until that exact version passes the
+repository's live containment verifier and is added to the verified-version
+file.
 
 - [ ] **Step 4: Document rollback**
 
@@ -841,11 +917,13 @@ docker compose -f compose.yaml -f compose.workspace.yaml down
 docker compose up -d
 ```
 
-Explain that stale managed workspace policy is automatically restored and OAuth named volumes are retained.
+Explain that stale managed workspace policy is automatically restored and OAuth
+named volumes are retained.
 
 - [ ] **Step 5: Verify every documented Compose command**
 
-Run corresponding `docker compose ... config` commands with a disposable valid host path and confirm they resolve.
+Run corresponding `docker compose ... config` commands with a disposable valid
+host path and confirm they resolve.
 
 - [ ] **Step 6: Commit**
 
@@ -893,4 +971,6 @@ test: gate live read-only workspace containment
 docs: document read-only host workspace operation
 ```
 
-Do not merge if any non-workspace canary is disclosed, the host fixture changes, `auto-rw-*` reaches `agy`, or the exact CLI version is not backed by a full live PASS.
+Do not merge if any non-workspace canary is disclosed, the host fixture changes,
+`auto-rw-*` reaches `agy`, or the exact CLI version is not backed by a full live
+PASS.

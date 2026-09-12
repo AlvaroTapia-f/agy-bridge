@@ -2,28 +2,41 @@
 
 **Status:** Approved architecture after security audit
 
-**Base:** `main` at or after PR #2 merge commit `471c32a77c407ee311aa04b7e465e0c1fce4ca71`
+**Base:** `main` at or after PR #2 merge commit
+`471c32a77c407ee311aa04b7e465e0c1fce4ca71`
 
-**Selected scope:** Option A, one explicit host workspace per deployment, read-only only
+**Selected scope:** Option A, one explicit host workspace per deployment,
+read-only only
 
 **Deferred:** read-write host workspace support moves to PR #4
 
 ## 1. Goal
 
-Add an explicit Docker-only workspace mode that lets `auto-ro-*` inspect one operator-selected host project mounted at `/workspace`, while preserving the secure no-workspace default and all PR #2 OAuth/network boundaries.
+Add an explicit Docker-only workspace mode that lets `auto-ro-*` inspect one
+operator-selected host project mounted at `/workspace`, while preserving the
+secure no-workspace default and all PR #2 OAuth/network boundaries.
 
-PR #3 must not provide host-project write access. In explicit workspace mode, every `auto-rw-*` request is rejected before `agy` is spawned.
+PR #3 must not provide host-project write access. In explicit workspace mode,
+every `auto-rw-*` request is rejected before `agy` is spawned.
 
 ## 2. Security objective
 
 PR #3 must establish two separate guarantees:
 
-1. **Host project integrity:** the selected host project is mounted read-only by Docker, so neither the model nor Antigravity can mutate it even if a higher-level permission rule is wrong.
-2. **Non-workspace confidentiality:** an `auto-ro-*` worker must not be able to use Antigravity file tools to read `/app`, bridge state, local bridge secrets, keyring storage, Antigravity configuration, or another path outside `/workspace`.
+1. **Host project integrity:** the selected host project is mounted read-only by
+   Docker, so neither the model nor Antigravity can mutate it even if a
+   higher-level permission rule is wrong.
+2. **Non-workspace confidentiality:** an `auto-ro-*` worker must not be able to
+   use Antigravity file tools to read `/app`, bridge state, local bridge
+   secrets, keyring storage, Antigravity configuration, or another path outside
+   `/workspace`.
 
-The first guarantee is enforced by the kernel/Docker mount. The second requires explicit Antigravity workspace policy plus live containment canaries on the exact CLI version used by the image.
+The first guarantee is enforced by the kernel/Docker mount. The second requires
+explicit Antigravity workspace policy plus live containment canaries on the
+exact CLI version used by the image.
 
-Prompt instructions are defense-in-depth only. They are never treated as a security boundary.
+Prompt instructions are defense-in-depth only. They are never treated as a
+security boundary.
 
 ## 3. Non-goals
 
@@ -39,7 +52,8 @@ PR #3 does not implement:
 - Docker socket access;
 - broad host root or user-profile mounts;
 - Google OAuth token extraction or private Google API calls;
-- wildcard Antigravity grants such as `read_file(*)`, `write_file(*)`, or `command(*)`;
+- wildcard Antigravity grants such as `read_file(*)`, `write_file(*)`, or
+  `command(*)`;
 - `--dangerously-skip-permissions`.
 
 ## 4. Deployment states
@@ -88,11 +102,13 @@ Properties:
 - `/app` remains bridge application code, not caller workspace;
 - `auto-ro-*` uses `/workspace` as its explicit child working directory;
 - `auto-rw-*` returns HTTP 403 before spawning `agy`;
-- workspace mode requires `MAX_CONCURRENT=1` to make the per-run policy transaction race-free.
+- workspace mode requires `MAX_CONCURRENT=1` to make the per-run policy
+  transaction race-free.
 
 ## 5. Compose design
 
-`compose.yaml` remains the secure no-workspace default and should not gain a host bind mount.
+`compose.yaml` remains the secure no-workspace default and should not gain a
+host bind mount.
 
 Create `compose.workspace.yaml` as an explicit override with these properties:
 
@@ -121,24 +137,32 @@ services:
 
 The existing OAuth/keyring/secrets/state named volumes remain unchanged.
 
-The root filesystem being read-only protects `/app` and other image content from mutation, but it is not treated as protection for separately mounted named volumes.
+The root filesystem being read-only protects `/app` and other image content from
+mutation, but it is not treated as protection for separately mounted named
+volumes.
 
-Only `agy-bridge` receives `/workspace`. Helper services such as `agy-auth`, `print-token`, and `init-secrets` must not receive the host project mount.
+Only `agy-bridge` receives `/workspace`. Helper services such as `agy-auth`,
+`print-token`, and `init-secrets` must not receive the host project mount.
 
 ## 6. Startup validation
 
-When workspace mode is enabled, `docker/start-bridge.sh` must fail closed unless all of the following are true:
+When workspace mode is enabled, `docker/start-bridge.sh` must fail closed unless
+all of the following are true:
 
 - `AGY_WORKSPACE_ROOT` is exactly `/workspace`;
 - `AGY_WORKSPACE_MODE` is exactly `ro`;
 - `MAX_CONCURRENT` is exactly `1`;
 - `/workspace` exists as a distinct mount;
 - `/proc/self/mountinfo` reports the `/workspace` mount as `ro`;
-- the host path was supplied through Compose and not inferred from `/app` or the bridge CWD;
-- no workspace-local agent file shadows the reserved Docker workspace agent name;
-- the installed `agy` version is present in the repository's workspace-verified version allowlist.
+- the host path was supplied through Compose and not inferred from `/app` or the
+  bridge CWD;
+- no workspace-local agent file shadows the reserved Docker workspace agent
+  name;
+- the installed `agy` version is present in the repository's workspace-verified
+  version allowlist.
 
-The mount check must inspect `/proc/self/mountinfo`; it must not use a destructive write probe against the host project.
+The mount check must inspect `/proc/self/mountinfo`; it must not use a
+destructive write probe against the host project.
 
 ## 7. Exact Antigravity version gate
 
@@ -148,11 +172,16 @@ Create:
 docker/workspace/verified-agy-versions.txt
 ```
 
-Workspace mode checks `agy --version` and requires an exact match to one line in this file.
+Workspace mode checks `agy --version` and requires an exact match to one line in
+this file.
 
-The default no-workspace deployment is not blocked by this workspace-specific gate.
+The default no-workspace deployment is not blocked by this workspace-specific
+gate.
 
-A version may be added only after the full live workspace containment verifier passes on that exact version and final PR SHA. A later image rebuild that installs a new unverified `agy` version must fail workspace startup rather than silently inherit old security claims.
+A version may be added only after the full live workspace containment verifier
+passes on that exact version and final PR SHA. A later image rebuild that
+installs a new unverified `agy` version must fail workspace startup rather than
+silently inherit old security claims.
 
 ## 8. Docker-specific managed agent
 
@@ -182,11 +211,16 @@ plugins: []
 ---
 ```
 
-The body must state that `/workspace` is the only caller project root and that `/app`, `$HOME`, bridge state, config, keyring, and secrets are outside the caller workspace.
+The body must state that `/workspace` is the only caller project root and that
+`/app`, `$HOME`, bridge state, config, keyring, and secrets are outside the
+caller workspace.
 
-The agent has only local read/search tools (`view_file`, `list_dir`, `grep_search`, `find_by_name`). It has no web, write, command, MCP, plugin, or skill capability.
+The agent has only local read/search tools (`view_file`, `list_dir`,
+`grep_search`, `find_by_name`). It has no web, write, command, MCP, plugin, or
+skill capability.
 
-The current native/default `worker-ro` agent remains available for no-workspace behavior.
+The current native/default `worker-ro` agent remains available for no-workspace
+behavior.
 
 Workspace startup fails if either of these exists:
 
@@ -222,12 +256,14 @@ Rules:
 - any other combination -> startup failure;
 - no code may infer workspace from `Deno.cwd()`;
 - ordinary model routes never receive workspace execution context;
-- `auto-ro-*` uses the Docker-specific reserved agent only when workspace mode is active;
+- `auto-ro-*` uses the Docker-specific reserved agent only when workspace mode
+  is active;
 - `auto-rw-*` in workspace mode returns 403 before `agy` invocation.
 
 ## 10. Trusted workspace prompt
 
-Only workspace-enabled `auto-ro-*` receives a bridge-owned prompt section before caller messages:
+Only workspace-enabled `auto-ro-*` receives a bridge-owned prompt section before
+caller messages:
 
 ```text
 # Bridge workspace contract
@@ -243,9 +279,11 @@ No workspace prompt text is added when workspace mode is disabled.
 
 ## 11. Workspace child environment sanitization
 
-The existing generic child environment behavior must not be reused for an explicit host-workspace execution.
+The existing generic child environment behavior must not be reused for an
+explicit host-workspace execution.
 
-Create a workspace-specific allowlist. Start with only values required by official `agy` and its authenticated keyring session:
+Create a workspace-specific allowlist. Start with only values required by
+official `agy` and its authenticated keyring session:
 
 ```text
 HOME
@@ -269,13 +307,18 @@ STATE_DIR
 AGY_WORKSPACE_HOST_PATH
 ```
 
-If live OAuth validation proves another environment variable is required, add that variable explicitly and document why. Do not return to copy-all-minus-a-blocklist behavior for workspace execution.
+If live OAuth validation proves another environment variable is required, add
+that variable explicitly and document why. Do not return to
+copy-all-minus-a-blocklist behavior for workspace execution.
 
-Default/no-workspace child behavior remains unchanged in PR #3 to minimize unrelated regression risk.
+Default/no-workspace child behavior remains unchanged in PR #3 to minimize
+unrelated regression risk.
 
 ## 12. Transactional Antigravity policy
 
-Antigravity settings are global under `~/.gemini/antigravity-cli/settings.json`, so PR #3 must not leave workspace restrictions enabled for unrelated bridge routes.
+Antigravity settings are global under `~/.gemini/antigravity-cli/settings.json`,
+so PR #3 must not leave workspace restrictions enabled for unrelated bridge
+routes.
 
 Create a local helper:
 
@@ -289,9 +332,11 @@ For each workspace `auto-ro-*` invocation:
 
 1. after acquiring the bridge concurrency slot, apply the RO workspace policy;
 2. spawn the official `agy` process;
-3. restore the previous managed settings in `finally`, regardless of success, failure, abort, or hard deadline.
+3. restore the previous managed settings in `finally`, regardless of success,
+   failure, abort, or hard deadline.
 
-Startup also runs `workspace-policy.sh restore-if-needed` so an abrupt bridge/container termination cannot leave a stale policy transaction behind.
+Startup also runs `workspace-policy.sh restore-if-needed` so an abrupt
+bridge/container termination cannot leave a stale policy transaction behind.
 
 The helper manages only these top-level settings:
 
@@ -337,11 +382,13 @@ RO policy:
 
 No wildcard permission appears in either allow or deny lists.
 
-The policy helper may inspect settings, but it must never inspect, copy, print, or transform Google OAuth access/refresh tokens or the bridge Bearer token.
+The policy helper may inspect settings, but it must never inspect, copy, print,
+or transform Google OAuth access/refresh tokens or the bridge Bearer token.
 
 ## 13. Deno permissions
 
-The main bridge process must not gain direct filesystem access to `/workspace` merely to support the feature.
+The main bridge process must not gain direct filesystem access to `/workspace`
+merely to support the feature.
 
 Do not add:
 
@@ -352,9 +399,12 @@ Do not add:
 --allow-write
 ```
 
-The bridge may receive `--allow-run` for the exact local workspace-policy helper in addition to the official `agy` binary.
+The bridge may receive `--allow-run` for the exact local workspace-policy helper
+in addition to the official `agy` binary.
 
-If setting child `cwd=/workspace` unexpectedly requires a Deno filesystem permission, implementation stops for design review rather than broadening permissions automatically.
+If setting child `cwd=/workspace` unexpectedly requires a Deno filesystem
+permission, implementation stops for design review rather than broadening
+permissions automatically.
 
 ## 14. Runtime logging
 
@@ -451,15 +501,18 @@ README-fixture.txt
 nested/inspect-me.txt
 ```
 
-Create harmless canaries outside the workspace inside the container/runtime environment:
+Create harmless canaries outside the workspace inside the container/runtime
+environment:
 
 - `/app` canary;
 - bridge-state canary;
 - agy-secrets dummy canary;
 - keyring-storage dummy canary;
-- a bridge-only environment canary that is intentionally omitted from the sanitized child environment.
+- a bridge-only environment canary that is intentionally omitted from the
+  sanitized child environment.
 
-Never use real OAuth tokens, real bridge tokens, or real keyring secrets as probe values.
+Never use real OAuth tokens, real bridge tokens, or real keyring secrets as
+probe values.
 
 The full live verifier must prove:
 
@@ -477,23 +530,29 @@ The full live verifier must prove:
 12. OAuth remains usable;
 13. Host and Bearer guards remain unchanged;
 14. port publication remains loopback-only;
-15. OAuth/state survive restart, down/up, recreation, rebuild, and Docker Desktop restart as in PR #2.
+15. OAuth/state survive restart, down/up, recreation, rebuild, and Docker
+    Desktop restart as in PR #2.
 
 Any non-workspace canary disclosure is a merge blocker.
 
 ## 17. Supported host claim
 
-PR #3 may advertise explicit host workspace support only for environments that pass the full workspace verifier.
+PR #3 may advertise explicit host workspace support only for environments that
+pass the full workspace verifier.
 
-Initial advertised live support is Windows Docker Desktop x86_64 because that is the environment already used for PR #2 acceptance and is the target for the first PR #3 workspace gate.
+Initial advertised live support is Windows Docker Desktop x86_64 because that is
+the environment already used for PR #2 acceptance and is the target for the
+first PR #3 workspace gate.
 
-Other Docker hosts remain unverified until the same workspace containment gates pass there.
+Other Docker hosts remain unverified until the same workspace containment gates
+pass there.
 
 ## 18. Rollback
 
 Return to the secure default by starting only `compose.yaml`.
 
-Startup recovery restores any stale workspace policy backup before normal bridge launch. No workspace bind is present and no OAuth volume deletion is required.
+Startup recovery restores any stale workspace policy backup before normal bridge
+launch. No workspace bind is present and no OAuth volume deletion is required.
 
 ## 19. Exit criteria
 
@@ -506,13 +565,16 @@ PR #3 may merge only when all of the following are true:
 - `auto-rw-*` cannot run in workspace mode;
 - workspace `agy` child CWD is explicitly `/workspace`;
 - workspace child environment is allowlisted and excludes bridge secrets;
-- the Docker-specific RO agent has no write, command, MCP, plugin, or skill capability;
-- transactional Antigravity policy restores exactly after every request and on stale-startup recovery;
+- the Docker-specific RO agent has no write, command, MCP, plugin, or skill
+  capability;
+- transactional Antigravity policy restores exactly after every request and on
+  stale-startup recovery;
 - no wildcard Antigravity permission exists;
 - no `--dangerously-skip-permissions` exists;
 - no Deno read/write grant to `/workspace` exists;
 - all non-workspace canaries remain inaccessible;
-- exact `agy` version is in the verified allowlist only after live acceptance passes;
+- exact `agy` version is in the verified allowlist only after live acceptance
+  passes;
 - OAuth/keyring persistence remains unchanged;
 - Host/Bearer/loopback boundaries remain unchanged;
 - native/default behavior remains unchanged when workspace config is absent;
