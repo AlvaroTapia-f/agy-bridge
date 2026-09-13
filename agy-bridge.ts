@@ -468,7 +468,10 @@ interface PreparedPrompt extends RenderedPrompt {
   evict?: () => void;
 }
 
-async function preparePrompt(req: OAIChatRequest, model: string): Promise<PreparedPrompt> {
+async function preparePrompt(
+  req: OAIChatRequest,
+  model: string,
+): Promise<PreparedPrompt> {
   const full = renderPrompt(req);
   if (!REUSE_ENABLED || !(req.messages?.length)) {
     return { ...full, fullPrompt: full.prompt, continued: false };
@@ -598,6 +601,7 @@ interface AgyResult {
   conversationId?: string;
   usage?: Record<string, number>;
   error?: string;
+  failureKind?: "natural" | "deadline" | "aborted";
 }
 
 type DeltaKind = "agent_response" | "thought" | "tool" | "unknown";
@@ -619,73 +623,128 @@ async function runAgy(
 ): Promise<AgyResult> {
   const release = await acquire();
   const started = Date.now();
-  const args = [
-    "--agent", agent,
-    "--model", model,
-    "--input-format", "stream-json",
-    "--output-format", "stream-json",
-    "--print-timeout", PRINT_TIMEOUT,
-  ];
-  if (conversationId) args.push("--conversation", conversationId);
-  const child = new Deno.Command(AGY_BIN, {
-    args,
-    stdout: "piped",
-    stderr: "piped",
-    stdin: "piped",
-    env: childEnv(),
-    clearEnv: true,
-  }).spawn();
-
-  // Prompts can exceed the 128 KiB per-argv Linux limit (opencode orchestrator
-  // system prompts do), so the prompt travels on stdin as a single NDJSON user
-  // event — agy's documented stream-json input protocol.
-  const stdinWriter = child.stdin.getWriter();
-  try {
-    await stdinWriter.write(
-      enc.encode(JSON.stringify({ event: "user", message: { content: prompt } }) + "\n"),
-    );
-  } finally {
-    stdinWriter.releaseLock();
-  }
-  await child.stdin.close();
-
-  // Drain stderr concurrently so a chatty agy can never block on a full pipe;
-  // .catch keeps a rare drain rejection from becoming an unhandled rejection
-  // that would abort the whole isolate mid-flight.
-  const stderrText = new Response(child.stderr).text().catch(() => "");
-
-  // Escalating kill: agy (or whatever it spawned) may ignore SIGTERM; SIGKILL
-  // cannot be ignored. `exited` is tracked to avoid pointless signals.
-  let exited = false;
-  void child.status.then(
-    () => { exited = true; },
-    () => { exited = true; },
-  );
-  let escalateTimer: ReturnType<typeof setTimeout> | null = null;
-  const killHard = () => {
-    if (exited) return;
-    try { child.kill("SIGTERM"); } catch { /* already dead */ }
-    if (escalateTimer === null) {
-      escalateTimer = setTimeout(() => {
-        if (!exited) {
-          try { child.kill("SIGKILL"); } catch { /* already dead */ }
-        }
-      }, 3_000);
-    }
-  };
-  const onAbort = () => killHard();
-  signal?.addEventListener("abort", onAbort, { once: true });
-
   const result: AgyResult = { ok: false, text: "" };
   let recoveredSalvage = false;
   let watchdog: ReturnType<typeof setTimeout> | null = null;
+  let onAbort: (() => void) | null = null;
+  let abortListenerAdded = false;
+
   try {
-    // The flow may never complete on its own: an orphaned run_command
-    // grandchild can hold the stdout pipe open forever (EOF requires ALL
-    // writers to close), and agy itself might hang past --print-timeout.
-    // Hence Promise.race against our own hard deadline below.
+    const args = [
+      "--agent",
+      agent,
+      "--model",
+      model,
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--print-timeout",
+      PRINT_TIMEOUT,
+    ];
+    if (conversationId) args.push("--conversation", conversationId);
+    const child = new Deno.Command(AGY_BIN, {
+      args,
+      stdout: "piped",
+      stderr: "piped",
+      stdin: "piped",
+      env: childEnv(),
+      clearEnv: true,
+    }).spawn();
+
+    // Start draining and arm termination machinery before any child I/O can
+    // block. In particular, a multi-megabyte stdin write can fill the pipe if
+    // agy keeps stdin open but never reads it.
+    const stderrText = new Response(child.stderr).text().catch(() => "");
+    const statusPromise = child.status;
+    let exited = false;
+    let escalateTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearEscalation = () => {
+      exited = true;
+      if (escalateTimer !== null) {
+        clearTimeout(escalateTimer);
+        escalateTimer = null;
+      }
+    };
+    void statusPromise.then(clearEscalation, clearEscalation);
+
+    const killHard = () => {
+      if (exited) return;
+      try {
+        child.kill("SIGTERM");
+      } catch { /* already dead */ }
+      if (escalateTimer === null) {
+        // This timer intentionally survives runAgy's outer finally. A child
+        // that ignores SIGTERM still needs SIGKILL after the request gate is
+        // released; child.status owns cancellation when the process exits.
+        escalateTimer = setTimeout(() => {
+          if (!exited) {
+            try {
+              child.kill("SIGKILL");
+            } catch { /* already dead */ }
+          }
+        }, 3_000);
+      }
+    };
+
+    let resolveAbort: ((value: "aborted") => void) | null = null;
+    const abortPromise = signal
+      ? new Promise<"aborted">((resolve) => {
+        resolveAbort = resolve;
+      })
+      : null;
+    onAbort = () => {
+      killHard();
+      resolveAbort?.("aborted");
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else {
+        signal.addEventListener("abort", onAbort, { once: true });
+        abortListenerAdded = true;
+      }
+    }
+
+    const deadlinePromise = new Promise<"deadline">((resolve) => {
+      watchdog = setTimeout(() => resolve("deadline"), AGY_HARD_DEADLINE_MS);
+    });
+
+    let terminalEarly = false;
     const flow = (async () => {
+      // Prompts can exceed the 128 KiB per-argv Linux limit (opencode
+      // orchestrator system prompts do), so the prompt travels on stdin as one
+      // NDJSON user event. BrokenPipe is expected if agy exits early.
+      let stdinClosedEarly = false;
+      const stdinWriter = child.stdin.getWriter();
+      try {
+        try {
+          await stdinWriter.write(
+            enc.encode(
+              JSON.stringify({ event: "user", message: { content: prompt } }) +
+                "\n",
+            ),
+          );
+        } catch (e) {
+          if (e instanceof Deno.errors.BrokenPipe) {
+            stdinClosedEarly = true;
+          } else {
+            throw e;
+          }
+        }
+      } finally {
+        stdinWriter.releaseLock();
+      }
+
+      if (!stdinClosedEarly) {
+        try {
+          await child.stdin.close();
+        } catch (e) {
+          if (!(e instanceof Deno.errors.BrokenPipe)) throw e;
+        }
+      }
+
       for await (const line of readLines(child.stdout)) {
+        if (terminalEarly) continue;
         const trimmed = line.trim();
         if (!trimmed.startsWith("{")) continue;
         let ev: Record<string, unknown>;
@@ -722,38 +781,59 @@ async function runAgy(
           }
         }
       }
-      const status = await child.status;
-      if (!result.ok && !result.error) {
+      const status = await statusPromise;
+      if (!terminalEarly && !result.ok && !result.error) {
         const errText = await stderrText;
         result.error = errText.trim() || `agy exited with code ${status.code}`;
       }
     })();
 
-    const outcome = await Promise.race([
-      flow.then(() => "done" as const),
-      new Promise<"deadline">((res) => {
-        watchdog = setTimeout(() => res("deadline"), AGY_HARD_DEADLINE_MS);
-      }),
-    ]);
+    let flowError: unknown = null;
+    const flowDone = flow.then(
+      () => "done" as const,
+      (error) => {
+        flowError = error;
+        return "done" as const;
+      },
+    );
+    const outcome = await Promise.race(
+      abortPromise
+        ? [flowDone, deadlinePromise, abortPromise]
+        : [flowDone, deadlinePromise],
+    );
+
+    if (watchdog !== null) {
+      clearTimeout(watchdog);
+      watchdog = null;
+    }
 
     if (outcome === "deadline") {
-      if (!result.error) {
-        result.error = `agy hard deadline exceeded (${PRINT_TIMEOUT} + ${HARD_MARGIN_MS}ms margin)`;
-      }
+      terminalEarly = true;
+      result.ok = false;
+      result.text = "";
+      result.failureKind = "deadline";
+      if (conversationId) handlers.evict?.();
+      result.error =
+        `agy hard deadline exceeded (${PRINT_TIMEOUT} + ${HARD_MARGIN_MS}ms margin)`;
       console.error(
         `runAgy hard deadline (${model}, ${AGY_HARD_DEADLINE_MS}ms): escalating kill`,
       );
       killHard();
-      // Deliberately NOT awaiting `flow`: orphaned grandchildren may keep the
-      // pipes open indefinitely. The gate must free NOW; the zombie flow keeps
-      // draining harmlessly with commit/evict skipped by the guard below.
-    }
-    // (deadline timer cleanup happens in `finally`)
-
-    // Conversation-store side effects only on clean completion — a deadline
-    // or abort must never leave stale conversation entries behind.
-    if (outcome === "done") {
-      if (result.ok && result.conversationId) handlers.commit?.(result.conversationId);
+    } else if (outcome === "aborted") {
+      terminalEarly = true;
+      result.ok = false;
+      result.text = "";
+      result.failureKind = "aborted";
+      if (conversationId) handlers.evict?.();
+      result.error = "agy request aborted";
+    } else {
+      if (flowError !== null) {
+        killHard();
+        throw flowError;
+      }
+      if (result.ok && result.conversationId) {
+        handlers.commit?.(result.conversationId);
+      }
       if (!result.ok && conversationId) handlers.evict?.();
       // Natural agy-side failure after real work: try to salvage the finished
       // report from the session transcript before failing the client.
@@ -768,11 +848,13 @@ async function runAgy(
           );
         }
       }
+      if (!result.ok) result.failureKind = "natural";
     }
   } finally {
     if (watchdog !== null) clearTimeout(watchdog);
-    if (escalateTimer !== null) clearTimeout(escalateTimer);
-    signal?.removeEventListener("abort", onAbort);
+    if (signal && onAbort && abortListenerAdded) {
+      signal.removeEventListener("abort", onAbort);
+    }
     release();
     const dur = (Date.now() - started) / 1000;
     await appendUsage({
@@ -1033,8 +1115,14 @@ async function handleChat(req: Request): Promise<Response> {
       req.signal,
       prepared.conversationId,
     );
-    if (!r.ok && prepared.continued) {
-      // stale conversation (expired/deleted): retry once as a fresh one
+    if (
+      !r.ok && prepared.continued && r.failureKind === "natural"
+    ) {
+      // Only a natural agy/session failure is eligible for stale-session
+      // recovery. Deadline/abort failures are terminal for this request, while
+      // process/I/O exceptions reject runAgy() and never reach this branch.
+      // runAgy() has already evicted the failed continued conversation before
+      // returning a natural failure, so this render is fresh.
       const fresh = await preparePrompt(body, model);
       r = await runAgy(model, fresh.prompt, {
         log: { ...log, continued: false },
