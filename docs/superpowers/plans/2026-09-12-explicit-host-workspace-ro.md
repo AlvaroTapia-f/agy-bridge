@@ -360,10 +360,22 @@ agy-bridge-worker-ro-v1
 Run:
 
 ```bash
-docker compose --profile test run --rm test
-deno fmt --check agy-bridge.ts
-deno lint
-deno task test
+docker compose --profile test build test
+
+docker compose --profile test run --rm \
+  -v "$PWD/docker/tests:/app/docker/tests:ro" \
+  -v "$PWD/docs/docker-compose.md:/app/docs/docker-compose.md:ro" \
+  test bash /app/docker/tests/run.sh
+
+docker compose --profile test run --rm \
+  -v "$PWD:/workspace:ro" \
+  -w /workspace \
+  test deno lint
+
+docker compose --profile test run --rm \
+  -v "$PWD:/workspace:ro" \
+  -w /workspace \
+  test deno task test
 ```
 
 Expected: PASS.
@@ -514,7 +526,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\test-compose-
 and:
 
 ```bash
-docker compose --profile test run --rm test
+docker compose --profile test build test
+
+docker compose --profile test run --rm \
+  -v "$PWD/docker/tests:/app/docker/tests:ro" \
+  -v "$PWD/docs/docker-compose.md:/app/docs/docker-compose.md:ro" \
+  test bash /app/docker/tests/run.sh
 ```
 
 Expected: PASS.
@@ -694,9 +711,22 @@ afterward in every path where restoration succeeded.
 
 ```bash
 bash docker/tests/test-workspace-policy.sh
-docker compose --profile test run --rm test
-deno lint
-deno task test
+docker compose --profile test build test
+
+docker compose --profile test run --rm \
+  -v "$PWD/docker/tests:/app/docker/tests:ro" \
+  -v "$PWD/docs/docker-compose.md:/app/docs/docker-compose.md:ro" \
+  test bash /app/docker/tests/run.sh
+
+docker compose --profile test run --rm \
+  -v "$PWD:/workspace:ro" \
+  -w /workspace \
+  test deno lint
+
+docker compose --profile test run --rm \
+  -v "$PWD:/workspace:ro" \
+  -w /workspace \
+  test deno task test
 ```
 
 Expected: PASS.
@@ -940,29 +970,66 @@ git commit -m "docs: document read-only host workspace operation"
 
 ## Final PR #3 Gate
 
-Run:
+Do not run `deno fmt --check` globally or on legacy files for this PR.
+Formatting checks, when needed, are limited to newly-created files owned by the
+current change. Windows CRLF normalization for Docker tests happens in the
+verifier's temporary container staging and must not rewrite the working tree.
+
+Run the deterministic and Deno gates without requiring host Deno:
 
 ```bash
-git diff main...HEAD --check
-deno fmt --check
-deno lint
-deno task test
-docker compose --profile test run --rm test
+docker compose --profile test build test
+
+docker compose --profile test run --rm \
+  -v "$PWD/docker/tests:/app/docker/tests:ro" \
+  -v "$PWD/docs/docker-compose.md:/app/docs/docker-compose.md:ro" \
+  test bash /app/docker/tests/run.sh
+
+docker compose --profile test run --rm \
+  -v "$PWD:/workspace:ro" \
+  -w /workspace \
+  test deno lint
+
+docker compose --profile test run --rm \
+  -v "$PWD:/workspace:ro" \
+  -w /workspace \
+  test deno task test
 ```
 
-On Windows:
+On Windows, run the safe/non-live phase first:
 
 ```powershell
+git diff origin/main...HEAD --check
+
 powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\test-compose.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\test-compose-workspace.ps1
 
 $HEAD = (git rev-parse HEAD).Trim()
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\docker\tests\verify-all.ps1 `
+  -ExpectedHead $HEAD `
+  -SkipLive `
+  -SkipDockerRestart
+```
+
+The safe verifier may intentionally finish with `VERDICT: INCOMPLETE` and its
+documented non-success exit status solely because mandatory live gates were
+skipped. The deterministic gate lines themselves must show PASS.
+
+After all non-live gates pass and the final candidate SHA is fixed, run the
+full live phase:
+
+```powershell
+$HEAD = (git rev-parse HEAD).Trim()
+
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\docker\tests\verify-all.ps1 `
   -ExpectedHead $HEAD
 ```
 
-Full acceptance requires all live and Docker-restart gates.
+Full acceptance requires all live and Docker-restart gates. No commit may be
+created after the full live PASS; otherwise the verified SHA is no longer the
+final candidate.
 
 Expected logical history:
 
