@@ -2,7 +2,9 @@
 set -euo pipefail
 source /app/docker/tests/assert.sh
 
-export KEYRING_PASSWORD_FILE="${KEYRING_PASSWORD_FILE:-/tmp/agy-test-keyring-password}"
+root="$(mktemp -d)"
+trap 'rm -rf "$root"' EXIT
+export KEYRING_PASSWORD_FILE="$root/keyring_password"
 printf '%s' 'test-only-keyring-password' > "$KEYRING_PASSWORD_FILE"
 chmod 600 "$KEYRING_PASSWORD_FILE"
 

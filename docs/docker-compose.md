@@ -1,7 +1,7 @@
 # Docker Compose Deployment
 
-This guide documents the Docker Compose deployment path for `agy-bridge`.
-The Compose configuration is host-OS-neutral: the application, Deno runtime,
+This guide documents the Docker Compose deployment path for `agy-bridge`. The
+Compose configuration is host-OS-neutral: the application, Deno runtime,
 official Google Antigravity `agy` CLI, D-Bus, and GNOME Keyring all run inside
 Linux containers. The host only needs a supported Docker runtime with Docker
 Compose v2.
@@ -21,19 +21,21 @@ http://127.0.0.1:7421/v1
 ## Platform support and verification status
 
 The Compose file itself does not contain host-specific bind mounts or host path
-assumptions. Compatibility still depends on Docker being able to build/run the
-Linux image and on the official `agy` installer supporting the container CPU
-architecture.
+assumptions. The current Dockerfile intentionally pins the official Linux x64
+`agy` artifact, version `1.2.2`, together with its SHA-512 digest. The build
+verifies that digest before extracting the binary; it does not execute a remote
+installer script.
 
-| Host environment | Status |
-| --- | --- |
-| Docker Desktop on Windows, x86_64 | Live-verified, including a Docker Desktop restart |
-| Docker Engine + Compose v2 on x86_64 Linux hosts | Expected compatible from the host-neutral Compose design; not yet live-verified |
-| Docker Desktop on Intel macOS hosts | Expected compatible from the host-neutral Compose design; not yet live-verified |
-| ARM64 hosts, including Apple Silicon | Do not claim support until the official `agy` installer/binary is explicitly verified for the container architecture |
+| Host environment                               | Status                                                                                                                 |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Docker Desktop / Docker Engine on x86_64 hosts | Supported by the pinned Linux x64 image path; run the verifier on the target host before release                       |
+| ARM64 hosts, including Apple Silicon           | Not supported by the current pin; update the official artifact URL and checksum only after validating an ARM64 release |
 
-The live acceptance evidence came from one Docker Desktop x86_64 host. That is
-verification provenance, not a product restriction.
+The deterministic verifier covers image construction, checksum policy, secrets,
+keyring behavior, Compose boundaries, bridge behavior, lint, and the Deno suite.
+Fresh OAuth enrollment and persistence are live/manual acceptance gates and must
+be rerun for the exact pinned CLI/runtime before claiming a host is
+live-verified.
 
 ## Requirements
 
@@ -44,8 +46,8 @@ On the host you need:
 - a Google account with valid Antigravity / Google AI Pro access;
 - host port `7421` available on `127.0.0.1`.
 
-You do **not** need to install Deno, `agy`, Python, Bash, systemd, or OpenCode on
-the host for this deployment path.
+You do **not** need to install Deno, `agy`, Python, Bash, systemd, or OpenCode
+on the host for this deployment path.
 
 ## First build and OAuth login
 
@@ -58,10 +60,12 @@ docker compose up -d
 docker compose run --rm print-token
 ```
 
-During `agy-auth`, the official CLI starts its account OAuth flow. Open the
-authorization URL in your host browser, complete Google sign-in, and return any
-required authorization code to the terminal. Do not save OAuth URLs, codes,
-cookies, or credentials in the repository.
+During `agy-auth`, the official CLI owns the account OAuth flow. Follow the
+prompts emitted by the pinned CLI. The wrapper intentionally does **not** fake
+`SSH_CONNECTION` or `SSH_TTY` to force a remote-login branch. Initial browser or
+headless-login behavior is therefore treated as version-specific live
+acceptance, not something the deterministic suite pretends to prove. Do not save
+OAuth URLs, codes, cookies, or credentials in the repository.
 
 After successful login, credentials are stored in Docker named volumes and are
 reused by later containers.
@@ -173,9 +177,9 @@ docker compose down
 This removes project containers and the project network but keeps named volumes.
 OAuth/config/secrets/state therefore remain available for the next startup.
 
-## Rebuild or update the image
+## Rebuild the image
 
-To rebuild from current base packages and reinstall the official `agy` CLI:
+To rebuild the current pinned runtime:
 
 ```sh
 docker compose build --pull --no-cache
@@ -183,6 +187,12 @@ docker compose up -d --force-recreate
 ```
 
 Named volumes are not removed by these commands.
+
+`docker compose build --pull` does **not** upgrade `agy`: the CLI artifact is
+deliberately pinned in `Dockerfile`. To update it, change `AGY_VERSION`,
+`AGY_ARTIFACT_URL`, and `AGY_ARTIFACT_SHA512` together from an official release
+manifest, then rebuild and rerun the complete verifier. Never replace this with
+an unchecked `curl | sh` installer path.
 
 ## Full destructive reset
 
@@ -294,7 +304,7 @@ versions. `docker/workspace/verified-agy-versions.txt` contains only exact
 semantic versions that have passed the full live workspace containment
 verifier on the final candidate PR SHA.
 
-An image rebuild may install a newer official CLI. Default no-workspace mode
+An explicit update to the pinned CLI artifact may install a newer official CLI. Default no-workspace mode
 continues to work, but workspace startup intentionally refuses that new version
 until it passes the repository verifier and is explicitly added to the
 allowlist. Do not add a version based only on unit, static, or Compose tests.
@@ -312,7 +322,7 @@ preflight.
 
 ## API examples
 
-List the models currently exposed by the authenticated `agy` session:
+List models:
 
 ```sh
 curl -fsS \
@@ -320,17 +330,13 @@ curl -fsS \
   http://127.0.0.1:7421/v1/models
 ```
 
-Choose a model id returned by that endpoint and use it as `<MODEL_ID>` below.
-Do not assume that a particular Antigravity model slug will remain available
-forever; the live catalog is the source of truth.
-
 Non-stream completion:
 
 ```sh
 curl -fsS \
   -H "Authorization: Bearer $AGY_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"model":"<MODEL_ID>","messages":[{"role":"user","content":"Reply with exactly: docker-ok"}],"stream":false}' \
+  -d '{"model":"gemini-3.8-flash-low","messages":[{"role":"user","content":"Reply with exactly: docker-ok"}],"stream":false}' \
   http://127.0.0.1:7421/v1/chat/completions
 ```
 
@@ -341,7 +347,7 @@ auto-ro-<model>
 auto-rw-<model>
 ```
 
-These routes select the managed Antigravity agents. This deployment does not
+These routes select the managed Antigravity agents. Their existence does not
 imply host workspace access for either route.
 
 ## Deterministic verification
@@ -350,15 +356,45 @@ Build and run the Docker-specific deterministic suite:
 
 ```sh
 docker compose --profile test build test
-docker compose --profile test run --rm test
+docker compose --profile test run --rm \
+  -v "$PWD/docker/tests:/app/docker/tests:ro" \
+  -v "$PWD/docs/docker-compose.md:/app/docs/docker-compose.md:ro" \
+  test bash /app/docker/tests/run.sh
 ```
 
-The Deno checks can also run inside the image:
+The production build context uses a closed positive allowlist and intentionally
+does not bake verifier/tests/docs into the runtime image. The deterministic
+suite bind-mounts those verifier inputs read-only instead. The Deno checks use
+the same runtime image with the checkout mounted read-only at `/workspace`:
 
 ```sh
-docker compose --profile test run --rm test deno lint
-docker compose --profile test run --rm test deno task test
+docker compose --profile test run --rm -v "$PWD:/workspace:ro" -w /workspace test deno lint
+docker compose --profile test run --rm -v "$PWD:/workspace:ro" -w /workspace test deno task test
 ```
+
+For portability evidence, run the deterministic suite from a Linux Docker
+Engine/CLI environment and also run the Windows PowerShell Compose boundary plus
+live Docker Desktop restart gate. A green deterministic run on one host is not a
+substitute for live verification on another.
+
+The repository includes `.github/workflows/linux-docker-deterministic.yml` for
+deterministic Linux Docker Engine evidence on GitHub Actions `ubuntu-24.04`. The
+workflow checks out the exact PR head SHA, verifies the frozen main base and PR3
+changed-path scope, prints Linux/Docker/commit identity, rejects Docker Desktop,
+and runs the Docker deterministic suite plus `deno lint` and `deno task test`
+inside the test image. `COMPOSE_PROJECT_NAME` is unique per Actions run so cleanup
+with `down -v` only touches disposable CI state.
+
+For the first pre-merge evidence run, push the exact
+`impl/pr3-explicit-host-workspace-ro` head to its remote branch. The workflow has a scoped
+`push` trigger for that branch and uses the frozen main SHA above as its identity
+base. `workflow_dispatch` remains available for later manual reruns, but GitHub
+only accepts that event after the workflow file exists on the repository default
+branch, so it is not the bootstrap path for this new workflow.
+
+**Linux Docker Engine evidence is pending until that workflow has an actual green
+run on the exact PR3 head.** The workflow file itself is not evidence. Retain the
+Actions run URL and exact commit SHA with the PR/review record after it passes.
 
 PowerShell helpers additionally validate resolved Compose defaults, the
 loopback-only security boundary, and the explicit read-only workspace override:
@@ -385,21 +421,24 @@ across restart, down/up, recreation, rebuild, and a Docker Desktop restart.
 Run it from the repository checkout you intend to validate:
 
 ```powershell
-$HEAD = (git rev-parse HEAD).Trim()
-
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\docker\tests\verify-all.ps1 `
-  -ExpectedHead $HEAD
+powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\verify-all.ps1 -BaseRef f5ae309fd1cfe11653753d9b62eb7da19abac767
 ```
 
-The verifier accepts `-SkipLive` and `-SkipDockerRestart` for partial/local
-checks, but either switch makes the result incomplete for full acceptance. A
-full acceptance run must execute the live official-`agy` and Docker-restart
-gates without those skip switches.
+This verifier is based on the frozen main merge commit
+`f5ae309fd1cfe11653753d9b62eb7da19abac767`. Keep `-BaseRef` explicit: the
+identity gate requires that exact SHA, proves it is an ancestor of `HEAD`, and
+rejects dirty tracked or untracked checkout state and changes outside the
+explicit workspace runtime, test, design-document, deployment-guide, and CI
+paths listed in `docker/tests/assert-pr3-identity.ps1`. The full verifier also validates
+that arbitrary local-only files cannot enter the Docker build context before the live
+OAuth/API/persistence gates and explicit Docker Desktop restart checkpoint. For a non-destructive
+deterministic pass, add `-SkipLive -SkipDockerRestart`; the verifier
+intentionally exits with code `2` and `VERDICT: INCOMPLETE` when mandatory live
+gates are skipped. That is not equivalent to release acceptance.
 
 ## Live acceptance coverage
 
-A full live acceptance run covers:
+Before release, live acceptance should cover:
 
 1. authenticated `GET /v1/models` plus official-`agy` non-stream and streaming
    calls;
@@ -424,13 +463,13 @@ version is retained in the allowlist.
 
 ## Troubleshooting
 
-| Symptom | Action |
-| --- | --- |
-| Antigravity requires authentication or startup preflight fails | `docker compose run --rm agy-auth` |
-| Keyring cannot be unlocked | Inspect `docker compose logs agy-bridge` and confirm the named volumes still exist before re-authenticating |
-| `agy` is obsolete or rejected | `docker compose build --pull --no-cache` followed by `docker compose up -d --force-recreate` |
-| `401` from `/v1/models` | Retrieve the local Bearer with `docker compose run --rm print-token` and send `Authorization: Bearer ...` |
-| `403` with an unexpected Host header | Use `127.0.0.1` or `localhost` |
-| Host port `7421` is occupied | Change only the loopback host-side port mapping |
-| Complete local reset is required | `docker compose down -v`, then run `agy-auth` again |
-| Service is down or unhealthy | `docker compose ps` and `docker compose logs --no-color --tail 100 agy-bridge` |
+| Symptom                                                        | Action                                                                                                      |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Antigravity requires authentication or startup preflight fails | `docker compose run --rm agy-auth`                                                                          |
+| Keyring cannot be unlocked                                     | Inspect `docker compose logs agy-bridge` and confirm the named volumes still exist before re-authenticating |
+| `agy` is obsolete or rejected                                  | Update the pinned version, official artifact URL, and SHA-512 together; rebuild; then rerun the verifier    |
+| `401` from `/v1/models`                                        | Retrieve the local Bearer with `docker compose run --rm print-token` and send `Authorization: Bearer ...`   |
+| `403` with an unexpected Host header                           | Use `127.0.0.1` or `localhost`                                                                              |
+| Host port `7421` is occupied                                   | Change only the loopback host-side port mapping                                                             |
+| Complete local reset is required                               | `docker compose down -v`, then run `agy-auth` again                                                         |
+| Service is down or unhealthy                                   | `docker compose ps` and `docker compose logs --no-color --tail 100 agy-bridge`                              |

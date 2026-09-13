@@ -1,0 +1,179 @@
+name: Linux Docker deterministic
+
+on:
+  push:
+    branches:
+      - "impl/pr3-explicit-host-workspace-ro"
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "agy-bridge.ts"
+      - "compose*.yaml"
+      - "agents/**"
+      - "docker/**"
+      - "tests/**"
+      - ".github/workflows/linux-docker-deterministic.yml"
+      - "docker/tests/**"
+      - "docs/docker-compose.md"
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "agy-bridge.ts"
+      - "compose*.yaml"
+      - "agents/**"
+      - "docker/**"
+      - "tests/**"
+      - ".github/workflows/linux-docker-deterministic.yml"
+      - "docker/tests/**"
+      - "docs/docker-compose.md"
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Frozen main runtime commit SHA
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: agy-bridge-linux-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Resolve exact head and base
+        id: refs
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+          PUSH_REPOSITORY: ${{ github.repository }}
+          FROZEN_BASE_REF: f5ae309fd1cfe11653753d9b62eb7da19abac767
+          DISPATCH_HEAD_SHA: ${{ github.sha }}
+          DISPATCH_BASE_REF: ${{ inputs.base_ref }}
+          DISPATCH_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            head_sha="$PR_HEAD_SHA"
+            base_ref="$FROZEN_BASE_REF"
+            head_repository="$PR_HEAD_REPOSITORY"
+          elif [[ "$EVENT_NAME" == "push" ]]; then
+            head_sha="$PUSH_HEAD_SHA"
+            base_ref="$FROZEN_BASE_REF"
+            head_repository="$PUSH_REPOSITORY"
+          else
+            head_sha="$DISPATCH_HEAD_SHA"
+            base_ref="$DISPATCH_BASE_REF"
+            head_repository="$DISPATCH_REPOSITORY"
+          fi
+
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "invalid head SHA: $head_sha" >&2
+            exit 1
+          }
+          [[ "$base_ref" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "invalid base SHA: $base_ref" >&2
+            exit 1
+          }
+          [[ -n "$head_repository" ]] || {
+            echo "head repository is empty" >&2
+            exit 1
+          }
+
+          {
+            echo "head_sha=$head_sha"
+            echo "base_ref=$base_ref"
+            echo "head_repository=$head_repository"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check out exact PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: ${{ steps.refs.outputs.head_repository }}
+          ref: ${{ steps.refs.outputs.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify repository identity and PR3 scope
+        shell: pwsh
+        env:
+          EXPECTED_HEAD: ${{ steps.refs.outputs.head_sha }}
+          BASE_REF: ${{ steps.refs.outputs.base_ref }}
+        run: |
+          ./docker/tests/assert-pr3-identity.ps1 `
+            -ExpectedHead $env:EXPECTED_HEAD `
+            -BaseRef $env:BASE_REF
+
+      - name: Print Linux, Docker, and commit identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -a
+          cat /etc/os-release
+          docker version
+          docker info
+          docker compose version
+          git rev-parse HEAD
+          git status --short
+
+          [[ "$(docker info --format '{{.OSType}}')" == "linux" ]] || {
+            echo "Docker server OSType is not linux" >&2
+            exit 1
+          }
+
+          docker_identity="$(
+            printf '%s %s' \
+              "$(docker info --format '{{.Name}}')" \
+              "$(docker info --format '{{.OperatingSystem}}')"
+          )"
+          if grep -qi 'docker desktop' <<<"$docker_identity"; then
+            echo "Docker Desktop is not accepted as Linux Docker Engine evidence: $docker_identity" >&2
+            exit 1
+          fi
+
+      - name: Build deterministic test image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --profile test build test
+
+      - name: Run Docker deterministic suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --profile test run --rm \
+            -v "$PWD/docker/tests:/app/docker/tests:ro" \
+            -v "$PWD/docs/docker-compose.md:/app/docs/docker-compose.md:ro" \
+            test bash /app/docker/tests/run.sh
+
+      - name: Run Deno lint in Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --profile test run --rm \
+            -v "$PWD:/workspace:ro" \
+            -w /workspace \
+            test deno lint
+
+      - name: Run full Deno test suite in Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --profile test run --rm \
+            -v "$PWD:/workspace:ro" \
+            -w /workspace \
+            test deno task test
+
+      - name: Clean isolated Compose state
+        if: always()
+        shell: bash
+        run: |
+          docker compose --profile test down -v --remove-orphans

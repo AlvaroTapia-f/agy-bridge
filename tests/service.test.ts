@@ -538,6 +538,16 @@ if [ "$1" = "models" ]; then
   exit 0
 fi
 
+count_file="$HOME/stale-session-count"
+count=0
+if [ -f "$count_file" ]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+
+read -r line
+
 # Check if --conversation is present
 has_conv=0
 for arg in "$@"; do
@@ -551,6 +561,15 @@ if [ "$has_conv" -eq 1 ]; then
   printf '{"event":"result","result":{"status":"ERROR","error":"session expired"}}\\n'
   exit 1
 else
+  if [ "$count" -eq 3 ]; then
+    case "$line" in
+      *"turn 1"*"turn 2"*) ;;
+      *)
+        printf '{"event":"result","result":{"status":"ERROR","error":"fresh retry lost conversation history"}}\\n'
+        exit 1
+        ;;
+    esac
+  fi
   # Fresh conversation succeeds
   printf '{"event":"result","result":{"status":"SUCCESS","response":"retried fresh success","conversation_id":"fresh-conv-99","usage":{"input_tokens":5,"output_tokens":3}}}\\n'
   exit 0
@@ -598,6 +617,257 @@ fi
     assertEquals(b2.choices[0].message.content, "retried fresh success");
   } finally {
     await harness.close();
+  }
+
+  const abortMockScript = `#!/usr/bin/env bash
+if [ "$1" = "models" ]; then
+  printf "gemini-2.5-pro\\tGemini 2.5 Pro\\n"
+  exit 0
+fi
+
+count_file="$HOME/continued-abort-count"
+count=0
+if [ -f "$count_file" ]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+
+read -r line
+if [ "$count" -eq 1 ]; then
+  printf '{"event":"result","result":{"status":"SUCCESS","response":"FIRST_ANSWER","conversation_id":"abort-conv-1","usage":{"input_tokens":5,"output_tokens":3}}}\\n'
+  exit 0
+fi
+
+if [ "$count" -eq 2 ]; then
+  printf 'started' > "$HOME/continued-abort-started"
+  sleep 10
+  exit 1
+fi
+
+has_conv=0
+for arg in "$@"; do
+  if [ "$arg" = "--conversation" ]; then
+    has_conv=1
+  fi
+done
+if [ "$has_conv" -eq 1 ]; then
+  printf 'continued' > "$HOME/post-abort-mode"
+else
+  printf 'fresh' > "$HOME/post-abort-mode"
+fi
+printf '{"event":"result","result":{"status":"SUCCESS","response":"POST_ABORT","conversation_id":"abort-conv-2","usage":{"input_tokens":5,"output_tokens":3}}}\\n'
+exit 0
+`;
+
+  const abortHarness = await ServiceHarness.create({
+    mockAgyScript: abortMockScript,
+    agyReuse: "on",
+  });
+
+  try {
+    const turn1 = await fetch(
+      `http://127.0.0.1:${abortHarness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gemini-2.5-pro",
+          messages: [{ role: "user", content: "turn 1" }],
+        }),
+      },
+    );
+    assertEquals(turn1.status, 200);
+
+    const abortController = new AbortController();
+    const turn2Promise = fetch(
+      `http://127.0.0.1:${abortHarness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
+        body: JSON.stringify({
+          model: "gemini-2.5-pro",
+          messages: [
+            { role: "user", content: "turn 1" },
+            { role: "assistant", content: "FIRST_ANSWER" },
+            { role: "user", content: "turn 2" },
+          ],
+        }),
+      },
+    );
+
+    const startedPath = `${abortHarness.homeDir}/continued-abort-started`;
+    const startedDeadline = Date.now() + 3_000;
+    let started = false;
+    while (Date.now() < startedDeadline) {
+      try {
+        await Deno.stat(startedPath);
+        started = true;
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+    assertEquals(started, true);
+    abortController.abort();
+    await turn2Promise.catch(() => undefined);
+
+    const usagePath = `${abortHarness.stateDir}/usage.jsonl`;
+    const usageDeadline = Date.now() + 2_000;
+    let usageLines: string[] = [];
+    while (Date.now() < usageDeadline) {
+      try {
+        usageLines = (await Deno.readTextFile(usagePath)).trim().split("\n");
+        if (usageLines.length >= 2) break;
+      } catch { /* usage log not created yet */ }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    // Give a buggy immediate retry enough time to append its own usage row.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    usageLines = (await Deno.readTextFile(usagePath)).trim().split("\n");
+    assertEquals(usageLines.length, 2);
+
+    const postAbort = await fetch(
+      `http://127.0.0.1:${abortHarness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gemini-2.5-pro",
+          messages: [
+            { role: "user", content: "turn 1" },
+            { role: "assistant", content: "FIRST_ANSWER" },
+            { role: "user", content: "turn 2" },
+          ],
+        }),
+      },
+    );
+    assertEquals(postAbort.status, 200);
+    assertEquals(
+      await Deno.readTextFile(`${abortHarness.homeDir}/post-abort-mode`),
+      "fresh",
+    );
+  } finally {
+    await abortHarness.close();
+  }
+
+  const timeoutMockScript = `#!/usr/bin/env bash
+if [ "$1" = "models" ]; then
+  printf "gemini-2.5-pro\\tGemini 2.5 Pro\\n"
+  exit 0
+fi
+
+count_file="$HOME/continued-timeout-count"
+count=0
+if [ -f "$count_file" ]; then
+  count="$(cat "$count_file")"
+fi
+count=$((count + 1))
+printf '%s' "$count" > "$count_file"
+
+read -r line
+printf '%s' "$line" > "$HOME/continued-timeout-prompt-$count"
+
+has_conv=0
+for arg in "$@"; do
+  if [ "$arg" = "--conversation" ]; then
+    has_conv=1
+  fi
+done
+
+if [ "$count" -eq 1 ]; then
+  printf '{"event":"result","result":{"status":"SUCCESS","response":"FIRST_ANSWER","conversation_id":"timeout-conv-1","usage":{"input_tokens":5,"output_tokens":3}}}\\n'
+  exit 0
+fi
+
+if [ "$count" -eq 2 ]; then
+  # The continued child exceeds the bridge hard deadline.
+  sleep 10
+  exit 1
+fi
+
+# Before the fix, a buggy caller-level retry reached count=3 and masked the
+# deadline. After that retry is blocked, count=3 is the next client request and
+# must not reuse the killed conversation.
+if [ "$has_conv" -eq 1 ]; then
+  printf 'continued' > "$HOME/post-timeout-mode"
+else
+  printf 'fresh' > "$HOME/post-timeout-mode"
+fi
+printf '{"event":"result","result":{"status":"SUCCESS","response":"POST_TIMEOUT","conversation_id":"timeout-conv-2","usage":{"input_tokens":5,"output_tokens":3}}}\\n'
+exit 0
+`;
+
+  const timeoutHarness = await ServiceHarness.create({
+    mockAgyScript: timeoutMockScript,
+    agyReuse: "on",
+    hardMarginMs: "100",
+    printTimeout: "1s",
+  });
+
+  try {
+    const turn1 = await fetch(
+      `http://127.0.0.1:${timeoutHarness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gemini-2.5-pro",
+          messages: [{ role: "user", content: "turn 1" }],
+        }),
+      },
+    );
+    assertEquals(turn1.status, 200);
+
+    const turn2 = await fetch(
+      `http://127.0.0.1:${timeoutHarness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gemini-2.5-pro",
+          messages: [
+            { role: "user", content: "turn 1" },
+            { role: "assistant", content: "FIRST_ANSWER" },
+            { role: "user", content: "turn 2" },
+          ],
+        }),
+      },
+    );
+    assertEquals(turn2.status, 502);
+    const turn2Body = await turn2.json();
+    assertStringIncludes(
+      turn2Body.error?.message,
+      "agy hard deadline exceeded",
+    );
+    assertEquals(
+      await Deno.readTextFile(`${timeoutHarness.homeDir}/continued-timeout-count`),
+      "2",
+    );
+
+    const postTimeout = await fetch(
+      `http://127.0.0.1:${timeoutHarness.port}/v1/chat/completions`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "gemini-2.5-pro",
+          messages: [
+            { role: "user", content: "turn 1" },
+            { role: "assistant", content: "FIRST_ANSWER" },
+            { role: "user", content: "turn 2" },
+          ],
+        }),
+      },
+    );
+    assertEquals(postTimeout.status, 200);
+    assertEquals(
+      await Deno.readTextFile(`${timeoutHarness.homeDir}/post-timeout-mode`),
+      "fresh",
+    );
+  } finally {
+    await timeoutHarness.close();
   }
 });
 

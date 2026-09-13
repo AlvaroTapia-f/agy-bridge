@@ -2,7 +2,7 @@
 param(
   [string]$ExpectedHead = '',
   [string]$Model = '',
-  [string]$BaseRef = '94430e6f0288c78191d31ba308f2c572c3cf8041',
+  [string]$BaseRef = 'f5ae309fd1cfe11653753d9b62eb7da19abac767',
   [switch]$SkipLive,
   [switch]$SkipDockerRestart,
   [int]$DockerRestartTimeoutSec = 300,
@@ -580,27 +580,28 @@ function Stop-WorkspaceVerifierDeployment {
 }
 
 $originalLocation = Get-Location
+$repoRoot = (Invoke-NativeCapture -FilePath 'git' -ArgumentList @(
+  'rev-parse', '--show-toplevel'
+) -Quiet).Output.Trim()
+if (-not $repoRoot) {
+  throw 'not inside the agy-bridge Git checkout'
+}
+$repoMountRoot = $repoRoot -replace '\\', '/'
+$dockerTestsMount = "${repoMountRoot}/docker/tests:/mnt/docker-tests:ro"
+$dockerDocsMount = "${repoMountRoot}/docs/docker-compose.md:/app/docs/docker-compose.md:ro"
+$sourceMount = "${repoMountRoot}:/workspace:ro"
+$stageDockerTests = [string]::Join("`n", @(
+  'set -euo pipefail',
+  'test ! -e /app/docker/tests',
+  'cp -R /mnt/docker-tests /tmp/docker-tests',
+  "find /tmp/docker-tests -type f -name '*.sh' -exec sed -i 's/\r$//' {} +",
+  'ln -s /tmp/docker-tests /app/docker/tests',
+  'exec bash /app/docker/tests/run.sh'
+))
 try {
+  Set-Location $repoRoot
   Invoke-Gate -Name 'Repository and final-head identity' -Action {
-    # git rev-parse HEAD
-    $root = (Invoke-NativeCapture -FilePath 'git' -ArgumentList @('rev-parse', '--show-toplevel') -Quiet).Output.Trim()
-    if (-not $root) { throw 'not inside the agy-bridge Git checkout' }
-    Set-Location $root
-
-    $head = (Invoke-NativeCapture -FilePath 'git' -ArgumentList @('rev-parse', 'HEAD') -Quiet).Output.Trim()
-    Write-Host "HEAD: $head"
-    if ($ExpectedHead -and $head -ne $ExpectedHead) {
-      throw "HEAD mismatch: expected $ExpectedHead, got $head"
-    }
-
-    $tracked = (Invoke-NativeCapture -FilePath 'git' -ArgumentList @('status', '--porcelain', '--untracked-files=no') -Quiet).Output.Trim()
-    if ($tracked) {
-      throw "tracked working tree is not clean:`n$tracked"
-    }
-
-    Invoke-NativeCapture -FilePath 'git' -ArgumentList @('cat-file', '-e', "$BaseRef^{commit}") -Quiet | Out-Null
-    # git diff --check
-    Invoke-NativeCapture -FilePath 'git' -ArgumentList @('diff', '--check', "$BaseRef...HEAD") -Quiet | Out-Null
+    & (Join-Path $PSScriptRoot 'assert-pr3-identity.ps1') -BaseRef $BaseRef -ExpectedHead $ExpectedHead
   }
 
   Invoke-Gate -Name 'Docker and Compose availability' -Action {
@@ -608,7 +609,7 @@ try {
     Invoke-DockerCapture -ArgumentList @('compose', 'version') -Quiet | Out-Null
   }
 
-  Invoke-Gate -Name 'Docker build-context canary' -Action {
+  Invoke-Gate -Name 'Docker build-context boundary' -Action {
     & (Join-Path $PSScriptRoot 'test-build-context.ps1')
   }
 
@@ -625,18 +626,32 @@ try {
   Invoke-Gate -Name 'Deterministic Docker suite' -Action {
     # docker compose --profile test build test
     Invoke-DockerCapture -ArgumentList @('compose', '--profile', 'test', 'build', 'test') | Out-Null
-    # docker compose --profile test run --rm test
-    Invoke-DockerCapture -ArgumentList @('compose', '--profile', 'test', 'run', '--rm', 'test') | Out-Null
+    # docker compose --profile test run --rm -v <tests> -v <docs> test
+    Invoke-DockerCapture -ArgumentList @(
+      'compose', '--profile', 'test', 'run', '--rm',
+      '-v', $dockerTestsMount,
+      '-v', $dockerDocsMount,
+      'test',
+      'bash', '-lc', $stageDockerTests
+    ) | Out-Null
   }
 
   Invoke-Gate -Name 'Deno lint inside Docker' -Action {
-    # docker compose --profile test run --rm test deno lint
-    Invoke-DockerCapture -ArgumentList @('compose', '--profile', 'test', 'run', '--rm', 'test', 'deno', 'lint') | Out-Null
+    # docker compose --profile test run --rm -v <checkout> -w /workspace test deno lint
+    Invoke-DockerCapture -ArgumentList @(
+      'compose', '--profile', 'test', 'run', '--rm',
+      '-v', $sourceMount, '-w', '/workspace',
+      'test', 'deno', 'lint'
+    ) | Out-Null
   }
 
   Invoke-Gate -Name 'Full Deno test suite inside Docker' -Action {
-    # docker compose --profile test run --rm test deno task test
-    Invoke-DockerCapture -ArgumentList @('compose', '--profile', 'test', 'run', '--rm', 'test', 'deno', 'task', 'test') | Out-Null
+    # docker compose --profile test run --rm -v <checkout> -w /workspace test deno task test
+    Invoke-DockerCapture -ArgumentList @(
+      'compose', '--profile', 'test', 'run', '--rm',
+      '-v', $sourceMount, '-w', '/workspace',
+      'test', 'deno', 'task', 'test'
+    ) | Out-Null
   }
 
   Invoke-Gate -Name 'Disposable down -v reset semantics' -Action {
@@ -915,7 +930,7 @@ finally {
   }
 
   if ($script:HadFailure) {
-    Write-Host 'VERDICT: FAIL - PR #3 is not merge-ready.' -ForegroundColor Red
+    Write-Host 'VERDICT: FAIL - Docker runtime stack is not merge-ready.' -ForegroundColor Red
     exit 1
   }
   if ($script:Incomplete) {

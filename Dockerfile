@@ -11,7 +11,9 @@ RUN apt-get update \
       dbus-x11 \
       gnome-keyring \
       jq \
+      gzip \
       libsecret-tools \
+      tar \
       tini \
  && rm -rf /var/lib/apt/lists/*
 
@@ -31,16 +33,25 @@ USER agy
 ENV HOME=/home/agy
 ENV DENO_DIR=/home/agy/.cache/deno
 ENV PATH=/home/agy/.local/bin:${PATH}
-RUN curl -fsSL https://antigravity.google/cli/install.sh \
-  | bash -s -- --dir /home/agy/.local/bin \
- && test -x /home/agy/.local/bin/agy
+
+ARG AGY_VERSION=1.2.2
+ARG AGY_ARTIFACT_URL=https://storage.googleapis.com/antigravity-public/antigravity-cli/1.2.2-6061403484848128/linux-x64/cli_linux_x64.tar.gz
+ARG AGY_ARTIFACT_SHA512=74342cf2a78b344392e573b638a648a6ad1f8e877f494b96e20f9c2b79158d5c423c40b2dcf788703362bb0a9150f09c707fde599d7557ce01c12208802a63cb
+RUN set -eux; \
+    staging="$(mktemp -d)"; \
+    trap 'rm -rf "$staging"' EXIT; \
+    curl -fsSL "$AGY_ARTIFACT_URL" -o "$staging/agy.tar.gz"; \
+    printf '%s  %s\n' "$AGY_ARTIFACT_SHA512" "$staging/agy.tar.gz" | sha512sum -c -; \
+    tar -xzf "$staging/agy.tar.gz" -C "$staging" antigravity; \
+    install -m 0755 "$staging/antigravity" /home/agy/.local/bin/agy; \
+    /home/agy/.local/bin/agy --version | grep -F "$AGY_VERSION"
 
 WORKDIR /app
 COPY --chown=agy:agy . /app
 USER root
 RUN find /app/docker -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
  && sed -i 's/\r$//' /app/docker/workspace/verified-agy-versions.txt \
- && chmod +x /app/docker/*.sh /app/docker/tests/*.sh 2>/dev/null || true
+ && chmod +x /app/docker/*.sh
 USER agy
 
 ENV AGY_BIN=/home/agy/.local/bin/agy

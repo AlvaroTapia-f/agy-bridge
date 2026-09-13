@@ -28,8 +28,6 @@ services:
       AGY_BIN: /home/agy/.local/bin/agy
       AGY_SECRETS_DIR: /home/agy/.local/share/agy-secrets
       KEYRING_PASSWORD_FILE: /home/agy/.local/share/agy-secrets/keyring_password
-      SSH_CONNECTION: "127.0.0.1 2222 127.0.0.1 22"
-      SSH_TTY: /dev/pts/0
     volumes:
       - agy-config:/home/agy/.gemini
       - agy-keyring:/home/agy/.local/share/keyrings
@@ -41,7 +39,11 @@ services:
     profiles: ["tools"]
     volumes:
       - agy-secrets:/home/agy/.local/share/agy-secrets
-    command: ["bash", "-lc", "/app/docker/init-secrets.sh && /app/docker/print-token.sh"]
+    command: [
+      "bash",
+      "-lc",
+      "/app/docker/init-secrets.sh && /app/docker/print-token.sh",
+    ]
 
   agy-bridge:
     <<: *agy-image
@@ -75,14 +77,26 @@ services:
       start_period: 10s
 
   test:
-    build:
-      context: .
-    image: agy-bridge:local
+    <<: *agy-image
     profiles: ["test"]
     environment:
       HOME: /home/agy
       AGY_BIN: /home/agy/.local/bin/agy
-    command: ["bash", "/app/docker/tests/run.sh"]
+      AGY_SECRETS_DIR: /tmp/agy-secrets
+      KEYRING_PASSWORD_FILE: /tmp/agy-secrets/keyring_password
+    command:
+      - bash
+      - -lc
+      - |
+          set -euo pipefail
+          "$$AGY_BIN" --version
+          for script in /app/docker/*.sh; do
+            bash -n "$$script"
+          done
+          /app/docker/init-secrets.sh
+          test "$(stat -c %a /tmp/agy-secrets)" = "700"
+          test "$(stat -c %a /tmp/agy-secrets/bridge_token)" = "600"
+          test "$(stat -c %a /tmp/agy-secrets/keyring_password)" = "600"
 
 volumes:
   agy-config:

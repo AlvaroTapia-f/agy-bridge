@@ -690,6 +690,7 @@ interface AgyResult {
   conversationId?: string;
   usage?: Record<string, number>;
   error?: string;
+  failureKind?: "natural" | "deadline" | "aborted";
 }
 
 type DeltaKind = "agent_response" | "thought" | "tool" | "unknown";
@@ -937,6 +938,8 @@ async function runAgy(
       terminalEarly = true;
       result.ok = false;
       result.text = "";
+      result.failureKind = "deadline";
+      if (conversationId) handlers.evict?.();
       result.error =
         `agy hard deadline exceeded (${PRINT_TIMEOUT} + ${HARD_MARGIN_MS}ms margin)`;
       console.error(
@@ -947,6 +950,8 @@ async function runAgy(
       terminalEarly = true;
       result.ok = false;
       result.text = "";
+      result.failureKind = "aborted";
+      if (conversationId) handlers.evict?.();
       result.error = "agy request aborted";
     } else {
       if (flowError !== null) {
@@ -970,6 +975,7 @@ async function runAgy(
           );
         }
       }
+      if (!result.ok) result.failureKind = "natural";
     }
   } finally {
     if (watchdog !== null) clearTimeout(watchdog);
@@ -1306,8 +1312,14 @@ async function handleChat(req: Request): Promise<Response> {
       req.signal,
       prepared.conversationId,
     );
-    if (!r.ok && prepared.continued) {
-      // stale conversation (expired/deleted): retry once as a fresh one
+    if (
+      !r.ok && prepared.continued && r.failureKind === "natural"
+    ) {
+      // Only a natural agy/session failure is eligible for stale-session
+      // recovery. Deadline/abort failures are terminal for this request, while
+      // process/I/O exceptions reject runAgy() and never reach this branch.
+      // runAgy() has already evicted the failed continued conversation before
+      // returning a natural failure, so this render is fresh.
       const fresh = await preparePrompt(body, model);
       r = await runAgy(model, fresh.prompt, {
         log: { ...log, continued: false },
