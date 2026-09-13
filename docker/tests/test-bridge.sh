@@ -166,6 +166,51 @@ count_after="$(cat "$HOME/fake-agy-count.txt")"
 assert_eq "$count_after" "$count_before"
 [[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "workspace policy backup remained after successful request"
 
+# A client disconnect must abort the in-flight workspace request, wait for the
+# child to reach terminal status, restore policy, and release the single slot.
+count_before="$(cat "$HOME/fake-agy-count.txt")"
+curl -sS -o "$work/aborted-request.json" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-ro-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"FAKE_HANG"}]}' \
+  http://127.0.0.1:17422/v1/chat/completions \
+  >"$work/aborted-request.out" 2>"$work/aborted-request.err" &
+abort_client_pid=$!
+
+abort_spawned=0
+for _ in $(seq 1 100); do
+  if [[ -f "$HOME/fake-agy-count.txt" ]]; then
+    count_now="$(cat "$HOME/fake-agy-count.txt")"
+    if (( count_now > count_before )); then
+      abort_spawned=1
+      break
+    fi
+  fi
+  sleep 0.05
+done
+(( abort_spawned == 1 )) || fail "aborted workspace request never spawned fake agy"
+[[ -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "workspace policy backup missing while aborted request was active"
+
+kill "$abort_client_pid" 2>/dev/null || true
+wait "$abort_client_pid" 2>/dev/null || true
+
+abort_restored=0
+for _ in $(seq 1 80); do
+  if [[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]]; then
+    abort_restored=1
+    break
+  fi
+  sleep 0.1
+done
+(( abort_restored == 1 )) || fail "workspace policy backup remained after client abort"
+
+after_abort="$(curl -fsS \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-ro-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"Reply after abort cleanup."}]}' \
+  http://127.0.0.1:17422/v1/chat/completions)"
+[[ "$after_abort" == *'fake reply'* ]] || fail "workspace concurrency slot was not released after client abort"
+
 # A child-side failure must still restore the policy transaction.
 code="$(curl -sS -o "$work/child-failure.json" -w '%{http_code}' \
   -H 'content-type: application/json' \
