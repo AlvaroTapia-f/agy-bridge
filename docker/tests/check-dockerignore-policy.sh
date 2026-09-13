@@ -22,6 +22,7 @@ expected_allowlist=(
   '!.env.example'
   '!Dockerfile'
   '!compose.yaml'
+  '!compose.workspace.yaml'
   '!deno.json'
   '!deno.lock'
   '!agy-bridge.ts'

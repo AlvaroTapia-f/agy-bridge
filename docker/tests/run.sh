@@ -11,6 +11,7 @@ bash /app/docker/tests/test-secrets.sh
 bash /app/docker/tests/test-keyring.sh
 bash /app/docker/tests/test-workspace-policy.sh /app/docker/workspace-policy.sh
 bash /app/docker/tests/check-runtime-permissions.sh /app/docker/start-bridge.sh
+bash /app/docker/tests/check-workspace-security-patterns.sh
 bash /app/docker/tests/check-runagy-lifecycle.sh /app/agy-bridge.ts
 bash /app/docker/tests/check-workspace-runagy-lifecycle.sh /app/agy-bridge.ts
 bash /app/docker/tests/check-verify-all-policy.sh /app/docker/tests/verify-all.ps1

@@ -4,6 +4,7 @@ file="${1:-/app/docker/tests/verify-all.ps1}"
 identity_file="${2:-/app/docker/tests/assert-pr3-identity.ps1}"
 identity_test="${3:-/app/docker/tests/test-verifier-identity.ps1}"
 docs_file="${4:-/app/docs/docker-compose.md}"
+suite_file="${5:-/app/docker/tests/run.sh}"
 
 [[ -f "$file" ]] || {
   echo "missing full verifier: $file" >&2
@@ -22,6 +23,11 @@ docs_file="${4:-/app/docs/docker-compose.md}"
 
 [[ -f "$docs_file" ]] || {
   echo "missing Docker deployment guide: $docs_file" >&2
+  exit 1
+}
+
+[[ -f "$suite_file" ]] || {
+  echo "missing deterministic Docker suite: $suite_file" >&2
   exit 1
 }
 
@@ -176,5 +182,10 @@ if grep -F -- '...HEAD' "$identity_file" >/dev/null; then
   echo 'full verifier must prove ancestry before diffing PR2 -> PR3; triple-dot alone is not an identity gate' >&2
   exit 1
 fi
+
+grep -F -- 'check-workspace-security-patterns.sh' "$suite_file" >/dev/null || {
+  echo 'deterministic Docker suite must invoke check-workspace-security-patterns.sh' >&2
+  exit 1
+}
 
 echo 'PASS: full verifier retains required Docker runtime merge gates'
