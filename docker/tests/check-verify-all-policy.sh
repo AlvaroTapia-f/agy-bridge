@@ -117,16 +117,22 @@ done
 identity_required=(
   '[string]$ExpectedHead'
   '[string]$BaseRef'
-  'f5ae309fd1cfe11653753d9b62eb7da19abac767'
+  '06567660cb765285cf68f28637169c79ddd1aabc'
+  '832d87d32bbc08ed1cb8ef105d41a7c4f27c4a63'
   'git rev-parse HEAD'
   '--untracked-files=all'
   'Base ref mismatch'
+  "'rev-list', '--parents'"
   'merge-base'
   '--is-ancestor'
   "'diff', '--name-only'"
   '^docker/tests/'
+  'compose.workspace-rw.yaml'
+  'agents/agy-bridge-worker-rw-v1/agent.md'
+  'docker/workspace/verified-rw-agy-versions.txt'
+  'docs/superpowers/plans/2026-09-14-read-write-host-workspace-pr4.md'
+  'docs/superpowers/specs/2026-09-13-read-write-host-workspace-design.md'
   'docs/docker-compose.md'
-  '.github/workflows/linux-docker-deterministic.yml'
   "'diff', '--check'"
 )
 
@@ -142,7 +148,7 @@ identity_regression_required=(
   'non-ancestor base'
   'disallowed changed path'
   'arbitrary untracked local file'
-  'allowed verifier/docs/workflow diff'
+  'allowed PR4 verifier/docs/runtime diff'
 )
 
 for needle in "${identity_regression_required[@]}"; do
@@ -152,10 +158,20 @@ for needle in "${identity_regression_required[@]}"; do
   }
 done
 
-grep -F -- 'f5ae309fd1cfe11653753d9b62eb7da19abac767' "$docs_file" >/dev/null || {
-  echo 'Docker deployment guide must pin the final frozen main SHA' >&2
+grep -F -- '06567660cb765285cf68f28637169c79ddd1aabc' "$docs_file" >/dev/null || {
+  echo 'Docker deployment guide must pin the PR3 integration baseline SHA' >&2
   exit 1
 }
+
+if grep -F -- 'f5ae309fd1cfe11653753d9b62eb7da19abac767' "$identity_file" >/dev/null; then
+  echo 'PR4 identity gate still references the pre-PR3-integration main SHA' >&2
+  exit 1
+fi
+
+if grep -F -- '0cdfe4131b59e2e93791437ffe85dc5b9895589f' "$identity_file" "$file" >/dev/null; then
+  echo 'active verifier identity must not use the stale historical PR3 SHA' >&2
+  exit 1
+fi
 
 if grep -F -- '878bb90a16281cc66a0c8ef849bb4329c2fab665' "$docs_file" >/dev/null; then
   echo 'Docker deployment guide still references the obsolete PR2 SHA' >&2
@@ -191,7 +207,7 @@ if grep -E 'upstream/main|origin/main' "$file" >/dev/null; then
 fi
 
 if grep -F -- '...HEAD' "$identity_file" >/dev/null; then
-  echo 'full verifier must prove ancestry before diffing PR2 -> PR3; triple-dot alone is not an identity gate' >&2
+  echo 'full verifier must prove ancestry before diffing the PR4 baseline -> HEAD; triple-dot alone is not an identity gate' >&2
   exit 1
 fi
 

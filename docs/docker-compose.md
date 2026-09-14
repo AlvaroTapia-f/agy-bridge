@@ -421,14 +421,16 @@ across restart, down/up, recreation, rebuild, and a Docker Desktop restart.
 Run it from the repository checkout you intend to validate:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\verify-all.ps1 -BaseRef f5ae309fd1cfe11653753d9b62eb7da19abac767
+powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\verify-all.ps1 -BaseRef 06567660cb765285cf68f28637169c79ddd1aabc
 ```
 
-This verifier is based on the frozen main merge commit
-`f5ae309fd1cfe11653753d9b62eb7da19abac767`. Keep `-BaseRef` explicit: the
-identity gate requires that exact SHA, proves it is an ancestor of `HEAD`, and
+This verifier is based on the PR3 integration commit
+`06567660cb765285cf68f28637169c79ddd1aabc`, which directly contains final PR3
+`832d87d32bbc08ed1cb8ef105d41a7c4f27c4a63`. Keep `-BaseRef` explicit: the
+identity gate requires that exact integration SHA, proves the final PR3 ancestry
+and that the base is an ancestor of `HEAD`, then
 rejects dirty tracked or untracked checkout state and changes outside the
-explicit workspace runtime, test, design-document, deployment-guide, and CI
+explicit PR4 workspace runtime, test, design-document, and deployment-guide
 paths listed in `docker/tests/assert-pr3-identity.ps1`. The full verifier also validates
 that arbitrary local-only files cannot enter the Docker build context before the live
 OAuth/API/persistence gates and explicit Docker Desktop restart checkpoint. For a non-destructive

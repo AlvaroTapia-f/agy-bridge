@@ -4,8 +4,8 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$expectedBase = 'f5ae309fd1cfe11653753d9b62eb7da19abac767'
-$oldBase = '7c59fd382953560f9a04e6a2cfadeb510a1804f7'
+$expectedBase = '06567660cb765285cf68f28637169c79ddd1aabc'
+$oldBase = 'f5ae309fd1cfe11653753d9b62eb7da19abac767'
 $prePr1 = '94430e6f0288c78191d31ba308f2c572c3cf8041'
 $identityScript = Join-Path $PSScriptRoot 'assert-pr3-identity.ps1'
 
@@ -111,19 +111,20 @@ try {
   $worktrees += $allowedWorktree
   New-Item -ItemType Directory -Force -Path (Join-Path $allowedWorktree 'docker/tests') | Out-Null
   New-Item -ItemType Directory -Force -Path (Join-Path $allowedWorktree 'docs') | Out-Null
-  New-Item -ItemType Directory -Force -Path (Join-Path $allowedWorktree '.github/workflows') | Out-Null
+  New-Item -ItemType Directory -Force -Path (Join-Path $allowedWorktree 'agents/agy-bridge-worker-rw-v1') | Out-Null
   Set-Content -NoNewline -Path (Join-Path $allowedWorktree 'docker/tests/identity-allowed.txt') -Value 'allowed verifier test change'
   Set-Content -NoNewline -Path (Join-Path $allowedWorktree 'docs/docker-compose.md') -Value 'allowed docs change'
-  Set-Content -NoNewline -Path (Join-Path $allowedWorktree '.github/workflows/linux-docker-deterministic.yml') -Value 'name: allowed workflow change'
-  Invoke-Git -WorkingDirectory $allowedWorktree -ArgumentList @('add', 'docker/tests/identity-allowed.txt', 'docs/docker-compose.md', '.github/workflows/linux-docker-deterministic.yml') | Out-Null
+  Set-Content -NoNewline -Path (Join-Path $allowedWorktree 'compose.workspace-rw.yaml') -Value 'services: {}'
+  Set-Content -NoNewline -Path (Join-Path $allowedWorktree 'agents/agy-bridge-worker-rw-v1/agent.md') -Value 'allowed RW agent fixture'
+  Invoke-Git -WorkingDirectory $allowedWorktree -ArgumentList @('add', 'docker/tests/identity-allowed.txt', 'docs/docker-compose.md', 'compose.workspace-rw.yaml', 'agents/agy-bridge-worker-rw-v1/agent.md') | Out-Null
   Invoke-Git -WorkingDirectory $allowedWorktree -ArgumentList @(
     '-c', 'user.name=PR3 Identity Test',
     '-c', 'user.email=pr3-identity-test@example.invalid',
     'commit', '-m', 'test: allowed PR3 identity fixture'
   ) | Out-Null
 
-  # allowed verifier/docs/workflow diff
-  Assert-Pass -Name 'allowed verifier/docs/workflow diff' -Result (Invoke-Identity -WorkingDirectory $allowedWorktree -BaseRef $expectedBase)
+  # allowed PR4 verifier/docs/runtime diff
+  Assert-Pass -Name 'allowed PR4 verifier/docs/runtime diff' -Result (Invoke-Identity -WorkingDirectory $allowedWorktree -BaseRef $expectedBase)
 
   $untrackedCanary = Join-Path $allowedWorktree "LOCAL-ONLY-UNTRACKED-$([Guid]::NewGuid().ToString('N')).txt"
   Set-Content -NoNewline -Path $untrackedCanary -Value 'arbitrary local-only file'
@@ -154,7 +155,7 @@ try {
   # disallowed changed path
   Assert-Fail -Name 'disallowed changed path' -Result (Invoke-Identity -WorkingDirectory $disallowedWorktree -BaseRef $expectedBase) -MessagePattern 'disallowed path'
 
-  Write-Host 'PASS: PR3 identity regression scenarios'
+  Write-Host 'PASS: PR4 identity regression scenarios'
 }
 finally {
   foreach ($worktree in $worktrees) {

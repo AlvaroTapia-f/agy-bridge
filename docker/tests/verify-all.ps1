@@ -2,7 +2,7 @@
 param(
   [string]$ExpectedHead = '',
   [string]$Model = '',
-  [string]$BaseRef = 'f5ae309fd1cfe11653753d9b62eb7da19abac767',
+  [string]$BaseRef = '06567660cb765285cf68f28637169c79ddd1aabc',
   [switch]$SkipLive,
   [switch]$SkipDockerRestart,
   [int]$DockerRestartTimeoutSec = 300,
