@@ -49,6 +49,7 @@ required=(
   'verified-rw-agy-versions.txt'
   'RW exact agy version and fixture setup'
   'RW intended workspace mutation'
+  'RW reserved-agent shadow denial'
   'RW generic deletion denial'
   'RW non-workspace read denial'
   'RW non-workspace write denial'

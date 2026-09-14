@@ -291,6 +291,32 @@ grep -q '^HOME=' "$rw_env" || fail "RW workspace child missing HOME"
 grep -q '^PATH=' "$rw_env" || fail "RW workspace child missing PATH"
 [[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "RW workspace policy backup remained after successful request"
 
+# A writable RW request can create a workspace-local file after startup. If it
+# plants the reserved managed-agent path, the next request must fail before a
+# second agy child is spawned.
+rm -rf /workspace/.agents
+count_before="$(cat "$HOME/fake-agy-count.txt")"
+plant_collision="$(curl -fsS \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-rw-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"FAKE_CREATE_RW_AGENT_COLLISION"}]}' \
+  http://127.0.0.1:17424/v1/chat/completions)"
+[[ "$plant_collision" == *'fake reply'* ]] || fail "RW collision fixture request did not complete"
+[[ -f /workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md ]] || fail "RW collision fixture was not created"
+count_after_plant="$(cat "$HOME/fake-agy-count.txt")"
+(( count_after_plant == count_before + 1 )) || fail "RW collision fixture request did not spawn exactly one fake agy"
+
+code="$(curl -sS -o "$work/rw-agent-shadow-denied.json" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-rw-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"Reply after collision."}]}' \
+  http://127.0.0.1:17424/v1/chat/completions)"
+count_after_denied="$(cat "$HOME/fake-agy-count.txt")"
+rm -rf /workspace/.agents
+assert_eq "$code" 502
+assert_eq "$count_after_denied" "$count_after_plant"
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "RW workspace policy backup created before reserved-agent assertion failed"
+
 # RW abort must keep the write policy applied only while the child is active,
 # then restore it before the MAX_CONCURRENT=1 slot can be reused.
 count_before="$(cat "$HOME/fake-agy-count.txt")"

@@ -107,6 +107,10 @@ jq -e '
   .toolPermission == "request-review" and
   .permissions.allow == ["read_file(/workspace)", "write_file(/workspace)"] and
   .permissions.deny == [
+    "write_file(/workspace/.agents/agents/agy-bridge-worker-ro-v1.md)",
+    "write_file(/workspace/.agents/agents/agy-bridge-worker-ro-v1/agent.md)",
+    "write_file(/workspace/.agents/agents/agy-bridge-worker-rw-v1.md)",
+    "write_file(/workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md)",
     "read_file(/app)",
     "write_file(/app)",
     "read_file(/home/agy/.gemini)",
@@ -122,6 +126,40 @@ jq -e '
   ([.permissions.allow[], .permissions.deny[]] | all(startswith("command(") | not))
 ' "$HOME/.gemini/antigravity-cli/settings.json" >/dev/null || fail 'RW policy mismatch'
 "$helper" restore
+
+# Request-time reserved-agent assertions are symlink-safe and mode-specific.
+rm -rf /workspace/.agents
+"$helper" assert-agent-paths-ro
+"$helper" assert-agent-paths-rw
+
+mkdir -p /workspace/.agents/agents/agy-bridge-worker-ro-v1
+printf '%s\n' shadow > /workspace/.agents/agents/agy-bridge-worker-ro-v1/agent.md
+if "$helper" assert-agent-paths-ro >/dev/null 2>&1; then
+  fail 'assert-agent-paths-ro accepted reserved RO agent collision'
+fi
+rm -rf /workspace/.agents
+
+mkdir -p /workspace/.agents/agents
+ln -s /workspace/DOES-NOT-EXIST /workspace/.agents/agents/agy-bridge-worker-ro-v1.md
+if "$helper" assert-agent-paths-ro >/dev/null 2>&1; then
+  fail 'assert-agent-paths-ro accepted dangling reserved RO agent symlink'
+fi
+rm -rf /workspace/.agents
+
+mkdir -p /workspace/.agents/agents/agy-bridge-worker-rw-v1
+printf '%s\n' shadow > /workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md
+"$helper" assert-agent-paths-ro
+if "$helper" assert-agent-paths-rw >/dev/null 2>&1; then
+  fail 'assert-agent-paths-rw accepted reserved RW agent collision'
+fi
+rm -rf /workspace/.agents
+
+mkdir -p /workspace/.agents/agents
+ln -s /workspace/DOES-NOT-EXIST /workspace/.agents/agents/agy-bridge-worker-rw-v1.md
+if "$helper" assert-agent-paths-rw >/dev/null 2>&1; then
+  fail 'assert-agent-paths-rw accepted dangling reserved RW agent symlink'
+fi
+rm -rf /workspace/.agents
 
 run_rw_restore_case rw-absent '__ABSENT__'
 run_rw_restore_case rw-present '{"allowNonWorkspaceAccess":true,"trustedWorkspaces":["/old"],"toolPermission":"permissive","permissions":{"allow":["legacy"],"deny":["legacy-deny"]},"unrelated":{"keep":7}}'

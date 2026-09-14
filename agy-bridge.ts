@@ -688,7 +688,14 @@ interface AgyExecutionContext {
   workspace?: WorkspaceExecution;
 }
 
-async function runWorkspacePolicy(action: "apply-ro" | "apply-rw" | "restore"): Promise<void> {
+type WorkspacePolicyAction =
+  | "assert-agent-paths-ro"
+  | "assert-agent-paths-rw"
+  | "apply-ro"
+  | "apply-rw"
+  | "restore";
+
+async function runWorkspacePolicy(action: WorkspacePolicyAction): Promise<void> {
   const child = new Deno.Command(WORKSPACE_POLICY_HELPER, {
     args: [action],
     stdout: "piped",
@@ -731,6 +738,14 @@ async function runAgy(
 
   try {
     if (workspace) {
+      try {
+        await runWorkspacePolicy(
+          workspace.mode === "ro" ? "assert-agent-paths-ro" : "assert-agent-paths-rw",
+        );
+      } catch (e) {
+        result.error = e instanceof Error ? e.message : String(e);
+        return result;
+      }
       if (workspace.mode === "ro") {
         await runWorkspacePolicy("apply-ro");
       } else {

@@ -135,6 +135,23 @@ try {
   Assert-StartupRejected -Name 'rw-agent-collision' -Workspace $workspace -Root '/workspace' -Mode 'rw' -MaxConcurrent '1' -WorkspaceMount 'rw' -Expected 'workspace contains reserved agent collision'
   Remove-Item -Recurse -Force (Join-Path $workspace '.agents')
 
+  foreach ($reservedPath in @(
+    '.agents/agents/agy-bridge-worker-ro-v1.md',
+    '.agents/agents/agy-bridge-worker-ro-v1/agent.md',
+    '.agents/agents/agy-bridge-worker-rw-v1.md',
+    '.agents/agents/agy-bridge-worker-rw-v1/agent.md'
+  )) {
+    $reservedDir = Split-Path -Parent (Join-Path $workspace ($reservedPath -replace '/', '\'))
+    New-Item -ItemType Directory -Force -Path $reservedDir | Out-Null
+    $workspaceDockerPath = $workspace -replace '\\', '/'
+    $containerReservedPath = '/workspace/' + $reservedPath
+    docker run --rm --mount "type=bind,src=$workspaceDockerPath,dst=/workspace" agy-bridge:local `
+      bash -lc "rm -f '$containerReservedPath'; ln -s /workspace/DOES-NOT-EXIST '$containerReservedPath'"
+    if ($LASTEXITCODE -ne 0) { throw "failed to create dangling reserved-agent symlink fixture: $reservedPath" }
+    Assert-StartupRejected -Name ("rw-dangling-agent-collision-" + ($reservedPath -replace '[^a-zA-Z0-9]+', '-')) -Workspace $workspace -Root '/workspace' -Mode 'rw' -MaxConcurrent '1' -WorkspaceMount 'rw' -Expected 'workspace contains reserved agent collision'
+    Remove-Item -Recurse -Force (Join-Path $workspace '.agents')
+  }
+
   Assert-StartupRejected -Name 'rw-version-not-verified' -Workspace $workspace -Root '/workspace' -Mode 'rw' -MaxConcurrent '1' -WorkspaceMount 'rw' -AgyBin 'deno' -Expected 'agy 2.9.6 is not verified for explicit read-write host workspace mode'
   Assert-StartupRejected -Name 'ro-mounted-rw' -Workspace $workspace -Root '/workspace' -Mode 'ro' -MaxConcurrent '1' -WorkspaceMount 'rw' -Expected 'read-only workspace mount must be read-only'
   Assert-StartupRejected -Name 'ro-version-allowlist' -Workspace $workspace -Root '/workspace' -Mode 'ro' -MaxConcurrent '1' -WorkspaceMount 'ro' -AgyBin 'deno' -Expected 'agy 2.9.6 is not verified for explicit read-only host workspace mode'

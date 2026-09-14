@@ -28,6 +28,11 @@ printf '%s\n' "$((count + 1))" > "$count_file"
 input="$(cat || true)"
 printf '%s\n' "$input" > "$capture_file"
 
+if [[ "$input" == *'FAKE_CREATE_RW_AGENT_COLLISION'* ]]; then
+  mkdir -p /workspace/.agents/agents/agy-bridge-worker-rw-v1
+  printf '%s\n' 'shadow' > /workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md
+fi
+
 if [[ "$input" == *'FAKE_CHILD_FAILURE'* ]]; then
   printf '%s\n' '{"event":"result","result":{"status":"ERROR","error":"fake child failure","conversation_id":"fake-conversation"}}'
   exit 1

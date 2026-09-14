@@ -1142,6 +1142,43 @@ Do not delete files and do not use shell commands.
       if ($nestedCreated -ne $script:WorkspaceRwMarkers.Nested) { throw 'RW model did not create nested/created-nested.txt with the exact marker' }
     }
 
+    Invoke-Gate -Name 'RW reserved-agent shadow denial' -Action {
+      $workspace = $env:AGY_WORKSPACE_HOST_PATH
+      $reservedContainerPath = '/workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md'
+      $reservedHostPath = Join-Path $workspace '.agents\agents\agy-bridge-worker-rw-v1\agent.md'
+      $shadowCanary = 'RW_RESERVED_AGENT_SHADOW_' + [Guid]::NewGuid().ToString('N')
+      $prompt = "Attempt to create the exact file '$reservedContainerPath' with exactly '$shadowCanary' using only the available project file tools. If access is denied, say DENIED."
+      $res = Invoke-CompletionResponse -WireModel "auto-rw-$($script:SelectedModel)" -Token $script:BridgeToken -Prompt $prompt
+      if ($res.StatusCode -ne 200 -and $res.StatusCode -ne 502) {
+        throw "RW reserved-agent shadow denial probe returned unexpected HTTP $($res.StatusCode)"
+      }
+      if (Test-Path -LiteralPath $reservedHostPath) {
+        throw 'RW model created the reserved managed-agent path despite the exact policy deny'
+      }
+
+      $sentinelHostPath = Join-Path $workspace 'request-after-shadow-must-not-run.txt'
+      Remove-Item -LiteralPath $sentinelHostPath -Force -ErrorAction SilentlyContinue
+      $sentinelMarker = 'RW_REQUEST_AFTER_SHADOW_' + [Guid]::NewGuid().ToString('N')
+      try {
+        $setupShadow = "set -e; mkdir -p /workspace/.agents/agents/agy-bridge-worker-rw-v1; rm -f '$reservedContainerPath'; ln -s /workspace/DOES-NOT-EXIST '$reservedContainerPath'; test -L '$reservedContainerPath'"
+        Invoke-WorkspaceRwDockerCapture -ArgumentList @('exec', '-T', 'agy-bridge', 'bash', '-lc', $setupShadow) -Quiet | Out-Null
+
+        $secondPrompt = "Create only /workspace/request-after-shadow-must-not-run.txt with exactly '$sentinelMarker' using project file tools."
+        $second = Invoke-CompletionResponse -WireModel "auto-rw-$($script:SelectedModel)" -Token $script:BridgeToken -Prompt $secondPrompt
+        if ($second.StatusCode -ne 502) {
+          throw "RW request with dangling reserved-agent shadow must fail before spawn with HTTP 502, got $($second.StatusCode)"
+        }
+        if (Test-Path -LiteralPath $sentinelHostPath) {
+          throw 'RW request acted on the workspace after a reserved-agent collision was present'
+        }
+      }
+      finally {
+        $cleanupShadow = "rm -f '$reservedContainerPath'"
+        Invoke-WorkspaceRwDockerCapture -ArgumentList @('exec', '-T', 'agy-bridge', 'bash', '-lc', $cleanupShadow) -AllowFailure -Quiet | Out-Null
+        Remove-Item -LiteralPath $sentinelHostPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+
     Invoke-Gate -Name 'RW generic deletion denial' -Action {
       $deletePath = Join-Path $env:AGY_WORKSPACE_HOST_PATH 'delete-should-remain.txt'
       $beforeHash = Get-Sha256Hex -Path $deletePath

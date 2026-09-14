@@ -74,10 +74,10 @@ if [[ -n "${AGY_WORKSPACE_ROOT:-}" || -n "${AGY_WORKSPACE_MODE:-}" ]]; then
     )
   fi
   for collision in "${workspace_collisions[@]}"; do
-    [[ ! -e "$collision" ]] || {
+    if [[ -e "$collision" || -L "$collision" ]]; then
       echo "workspace contains reserved agent collision: $collision" >&2
       exit 65
-    }
+    fi
   done
 
   if [[ "$workspace_mode" == "ro" ]]; then

@@ -14,6 +14,27 @@ fail() {
   exit 1
 }
 
+assert_agent_paths() {
+  local mode="$1"
+  local paths=(
+    /workspace/.agents/agents/agy-bridge-worker-ro-v1.md
+    /workspace/.agents/agents/agy-bridge-worker-ro-v1/agent.md
+  )
+  if [[ "$mode" == "rw" ]]; then
+    paths+=(
+      /workspace/.agents/agents/agy-bridge-worker-rw-v1.md
+      /workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md
+    )
+  fi
+
+  local path
+  for path in "${paths[@]}"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      fail "reserved workspace agent collision: $path"
+    fi
+  done
+}
+
 read_settings() {
   if [[ -f "$settings_file" ]]; then
     jq -e 'type == "object"' "$settings_file" >/dev/null 2>&1 || fail "settings.json is not a valid JSON object"
@@ -36,13 +57,20 @@ atomic_json_write() {
 }
 
 apply_policy() {
-  local mode="$1" allow
+  local mode="$1" allow extra_deny
   case "$mode" in
     ro)
       allow='["read_file(/workspace)"]'
+      extra_deny='[]'
       ;;
     rw)
       allow='["read_file(/workspace)","write_file(/workspace)"]'
+      extra_deny='[
+        "write_file(/workspace/.agents/agents/agy-bridge-worker-ro-v1.md)",
+        "write_file(/workspace/.agents/agents/agy-bridge-worker-ro-v1/agent.md)",
+        "write_file(/workspace/.agents/agents/agy-bridge-worker-rw-v1.md)",
+        "write_file(/workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md)"
+      ]'
       ;;
     *)
       fail "unsupported workspace policy mode: $mode"
@@ -73,13 +101,13 @@ apply_policy() {
     ')"
   atomic_json_write "$backup_file" "$backup"
 
-  updated="$(jq --argjson allow "$allow" '
+  updated="$(jq --argjson allow "$allow" --argjson extra_deny "$extra_deny" '
     .allowNonWorkspaceAccess = false
     | .trustedWorkspaces = ["/workspace"]
     | .toolPermission = "request-review"
     | .permissions = {
         allow: $allow,
-        deny: [
+        deny: ($extra_deny + [
           "read_file(/app)",
           "write_file(/app)",
           "read_file(/home/agy/.gemini)",
@@ -90,7 +118,7 @@ apply_policy() {
           "write_file(/home/agy/.local/share/keyrings)",
           "read_file(/home/agy/.local/state/agy-bridge)",
           "write_file(/home/agy/.local/state/agy-bridge)"
-        ]
+        ])
       }
   ' <<<"$settings")"
   atomic_json_write "$settings_file" "$updated"
@@ -133,6 +161,12 @@ restore_policy() {
 }
 
 case "$action" in
+  assert-agent-paths-ro)
+    assert_agent_paths ro
+    ;;
+  assert-agent-paths-rw)
+    assert_agent_paths rw
+    ;;
   apply-ro)
     apply_policy ro
     ;;
@@ -146,6 +180,6 @@ case "$action" in
     if [[ -e "$backup_file" ]]; then restore_policy; fi
     ;;
   *)
-    fail "usage: $0 {apply-ro|apply-rw|restore|restore-if-needed}"
+    fail "usage: $0 {assert-agent-paths-ro|assert-agent-paths-rw|apply-ro|apply-rw|restore|restore-if-needed}"
     ;;
 esac
