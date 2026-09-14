@@ -4,7 +4,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$expectedBase = 'bcf2f2532be7d32a78167d745a700f8a480114e0'
+$expectedBase = 'f5ae309fd1cfe11653753d9b62eb7da19abac767'
 $oldBase = '7c59fd382953560f9a04e6a2cfadeb510a1804f7'
 $prePr1 = '94430e6f0288c78191d31ba308f2c572c3cf8041'
 $identityScript = Join-Path $PSScriptRoot 'assert-pr3-identity.ps1'

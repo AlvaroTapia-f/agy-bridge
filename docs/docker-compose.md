@@ -254,19 +254,71 @@ The Docker runtime also preserves these boundaries:
 - no Docker socket mount;
 - no broad host filesystem mount.
 
-## Workspace and filesystem boundary
+## Explicit read-only host workspace
 
-This Docker runtime does **not** mount or infer an HTTP caller's project
-workspace.
+The secure default remains workspace-free:
 
-`/app` contains the `agy-bridge` application source baked into the image. It is
-not the caller's workspace, and the bridge does not infer a caller workspace
-from `Deno.cwd()`.
+```powershell
+docker compose up -d
+```
 
-The deployment does not automatically grant `read_file(/app)`,
-`write_file(/app)`, or command permissions to turn `/app` into an implicit
-workspace. Explicit host workspace support belongs in a separate later runtime
-change; this verifier/docs layer does not add it.
+With only `compose.yaml`, no host project is mounted, `/app` remains bridge
+application code, and `auto-ro-*` / `auto-rw-*` retain their existing
+non-host-workspace behavior. The bridge never infers a caller workspace from
+`Deno.cwd()`.
+
+PR #3 adds an **explicit, one-project, read-only** Docker override. On Windows
+PowerShell, point `AGY_WORKSPACE_HOST_PATH` only at the intended project:
+
+```powershell
+$env:AGY_WORKSPACE_HOST_PATH = 'C:\src\project'
+
+docker compose `
+  -f compose.yaml `
+  -f compose.workspace.yaml `
+  up -d
+```
+
+Do not use `C:\`, a user profile, Docker Desktop storage, or another broad
+host path. The selected directory is mounted exactly at `/workspace` with a
+Docker-enforced read-only bind. Only `agy-bridge` receives that mount; helper
+services do not.
+
+Workspace routing is deliberately asymmetric:
+
+```text
+auto-ro-* -> explicit /workspace read-only project access
+auto-rw-* -> HTTP 403 before agy is spawned
+ordinary/bare models -> no host workspace capability is implied
+```
+
+Workspace `auto-ro-*` runs with the reserved Docker read-only agent, child CWD
+`/workspace`, a bridge-owned workspace contract, a strict child-environment
+allowlist, and a transactional Antigravity read policy. The bridge itself does
+not receive Deno read/write permission for `/workspace`.
+
+### Exact `agy` version gate
+
+Explicit workspace mode is fail-closed against unverified official `agy`
+versions. `docker/workspace/verified-agy-versions.txt` contains only exact
+semantic versions that have passed the full live workspace containment
+verifier on the final candidate PR SHA.
+
+An explicit update to the pinned CLI artifact may install a newer official CLI. Default no-workspace mode
+continues to work, but workspace startup intentionally refuses that new version
+until it passes the repository verifier and is explicitly added to the
+allowlist. Do not add a version based only on unit, static, or Compose tests.
+
+### Return to the default deployment
+
+```powershell
+docker compose -f compose.yaml -f compose.workspace.yaml down
+docker compose up -d
+```
+
+Named OAuth/keyring/secrets/state volumes are retained. Startup also restores
+any stale managed workspace-policy transaction before the normal OAuth/model
+preflight.
 
 ## API examples
 
@@ -327,15 +379,15 @@ substitute for live verification on another.
 
 The repository includes `.github/workflows/linux-docker-deterministic.yml` for
 deterministic Linux Docker Engine evidence on GitHub Actions `ubuntu-24.04`. The
-workflow checks out the exact PR head SHA, verifies the frozen PR2 base and PR3
+workflow checks out the exact PR head SHA, verifies the frozen main base and PR3
 changed-path scope, prints Linux/Docker/commit identity, rejects Docker Desktop,
 and runs the Docker deterministic suite plus `deno lint` and `deno task test`
 inside the test image. `COMPOSE_PROJECT_NAME` is unique per Actions run so cleanup
 with `down -v` only touches disposable CI state.
 
 For the first pre-merge evidence run, push the exact
-`impl/docker-verifier-docs` head to its remote branch. The workflow has a scoped
-`push` trigger for that branch and uses the frozen PR2 SHA above as its identity
+`impl/pr3-explicit-host-workspace-ro` head to its remote branch. The workflow has a scoped
+`push` trigger for that branch and uses the frozen main SHA above as its identity
 base. `workflow_dispatch` remains available for later manual reruns, but GitHub
 only accepts that event after the workflow file exists on the repository default
 branch, so it is not the bootstrap path for this new workflow.
@@ -344,27 +396,40 @@ branch, so it is not the bootstrap path for this new workflow.
 run on the exact PR3 head.** The workflow file itself is not evidence. Retain the
 Actions run URL and exact commit SHA with the PR/review record after it passes.
 
-A PowerShell helper additionally validates resolved Compose defaults and the
-loopback-only security boundary:
+PowerShell helpers additionally validate resolved Compose defaults, the
+loopback-only security boundary, and the explicit read-only workspace override:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\test-compose.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\test-compose-workspace.ps1
 ```
 
-That PowerShell helper is a test convenience; it is not a runtime requirement.
+Those PowerShell helpers are test conveniences; they are not runtime
+requirements.
 
-For the complete acceptance harness on Windows PowerShell:
+## Full Windows + Docker Desktop acceptance
+
+`docker/tests/verify-all.ps1` is the end-to-end acceptance helper for this
+Docker deployment. In addition to the PR #2 gates, it validates the explicit
+workspace Compose boundary, requires the exact installed `agy` candidate to be
+staged in the verified-version allowlist, proves workspace fixture reads,
+proves host-project immutability, requires workspace `auto-rw-*` HTTP 403, and
+checks non-workspace canaries including traversal attempts. It then returns to
+the default deployment and re-runs the OAuth/state persistence transitions
+across restart, down/up, recreation, rebuild, and a Docker Desktop restart.
+
+Run it from the repository checkout you intend to validate:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\verify-all.ps1 -BaseRef bcf2f2532be7d32a78167d745a700f8a480114e0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\docker\tests\verify-all.ps1 -BaseRef f5ae309fd1cfe11653753d9b62eb7da19abac767
 ```
 
-This verifier is stacked on the frozen PR2 runtime commit
-`bcf2f2532be7d32a78167d745a700f8a480114e0`. Keep `-BaseRef` explicit: the
+This verifier is based on the frozen main merge commit
+`f5ae309fd1cfe11653753d9b62eb7da19abac767`. Keep `-BaseRef` explicit: the
 identity gate requires that exact SHA, proves it is an ancestor of `HEAD`, and
-rejects dirty tracked or untracked checkout state plus PR3 changes outside
-`docker/tests/**`, this deployment guide, and the exact Linux deterministic
-workflow path. The full verifier also validates
+rejects dirty tracked or untracked checkout state and changes outside the
+explicit workspace runtime, test, design-document, deployment-guide, and CI
+paths listed in `docker/tests/assert-pr3-identity.ps1`. The full verifier also validates
 that arbitrary local-only files cannot enter the Docker build context before the live
 OAuth/API/persistence gates and explicit Docker Desktop restart checkpoint. For a non-destructive
 deterministic pass, add `-SkipLive -SkipDockerRestart`; the verifier
@@ -375,20 +440,26 @@ gates are skipped. That is not equivalent to release acceptance.
 
 Before release, live acceptance should cover:
 
-1. authenticated `GET /v1/models`;
-2. one non-stream completion;
-3. one streaming completion ending in `data: [DONE]`;
-4. one non-filesystem `auto-ro-*` request;
-5. one non-destructive `auto-rw-*` request;
-6. OAuth persistence across restart, down/up, recreation, rebuild, and host
-   Docker-runtime restart;
-7. bridge-state persistence;
-8. isolated `down -v` reset behavior.
+1. authenticated `GET /v1/models` plus official-`agy` non-stream and streaming
+   calls;
+2. the exact official `agy` semantic version used for workspace mode;
+3. `auto-ro-*` reading both disposable `/workspace` fixture files;
+4. unchanged host hashes, timestamps, content, and directory entries after
+   model mutation requests;
+5. workspace `auto-rw-*` returning HTTP 403 without project mutation;
+6. denial of harmless `/app`, bridge-state, agy-secrets, keyring, and traversal
+   canaries;
+7. Host/Bearer/loopback boundaries after returning to default mode;
+8. OAuth/state persistence across restart, down/up, recreation, rebuild, and
+   Docker Desktop restart;
+9. bridge-state persistence and isolated `down -v` reset behavior.
 
-Do not advertise a host/runtime combination as live-verified merely because the
-deterministic suite is green. Run the full acceptance harness without skip flags
-using the exact pinned CLI version and retain the resulting gate summary as the
-verification evidence.
+The default Docker deployment has already been live-verified on a Windows
+x86_64 Docker Desktop host for the PR #2 OAuth/persistence boundaries. Explicit
+host-workspace support must **not** be advertised as live-verified until the
+full PR #3 verifier passes without `-SkipLive` and without
+`-SkipDockerRestart` on the final candidate SHA and the exact passing `agy`
+version is retained in the allowlist.
 
 ## Troubleshooting
 

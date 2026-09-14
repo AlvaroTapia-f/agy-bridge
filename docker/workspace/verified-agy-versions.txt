@@ -1,0 +1,6 @@
+# Exact official agy semantic versions that passed the full live read-only
+# workspace containment verifier on the final candidate PR SHA.
+#
+# Do not add a version based on unit/static tests alone. Workspace mode must
+# fail closed for every version not listed here.
+1.2.2

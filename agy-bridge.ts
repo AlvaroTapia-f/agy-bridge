@@ -55,6 +55,40 @@ const STATE_DIR = Deno.env.get("STATE_DIR") ??
   `${Deno.env.get("HOME")}/.local/state/agy-bridge`;
 const USAGE_LOG = `${STATE_DIR}/usage.jsonl`;
 
+type WorkspaceMode = "ro";
+
+interface WorkspaceConfig {
+  root: "/workspace";
+  mode: WorkspaceMode;
+}
+
+function loadWorkspaceConfig(): WorkspaceConfig | null {
+  const root = Deno.env.get("AGY_WORKSPACE_ROOT");
+  const mode = Deno.env.get("AGY_WORKSPACE_MODE");
+  if (!root && !mode) return null;
+  if (root !== "/workspace") {
+    throw new Error("AGY_WORKSPACE_ROOT must be /workspace");
+  }
+  if (mode !== "ro") {
+    throw new Error("AGY_WORKSPACE_MODE must be ro");
+  }
+  if (MAX_CONCURRENT !== 1) {
+    throw new Error("workspace mode requires MAX_CONCURRENT=1");
+  }
+  return { root, mode };
+}
+
+const WORKSPACE = loadWorkspaceConfig();
+const WORKSPACE_AGENT = "agy-bridge-worker-ro-v1";
+const WORKSPACE_POLICY_HELPER = "/app/docker/workspace-policy.sh";
+const WORKSPACE_CONTRACT = `# Bridge workspace contract
+
+The operator explicitly exposed one caller project at /workspace in read-only mode.
+Treat /workspace as the caller project root.
+Do not treat /app, HOME, the bridge process directory, bridge state, configuration, keyring data, or secrets as caller project files.
+Use project filesystem tools only within /workspace.
+The workspace is read-only. Never create, modify, delete, or execute project files.`;
+
 // ---------- autonomous delegation (models prefixed "auto-<profile>-") ----------
 //
 // "auto-ro-gemini-3.7-flash-high" runs ONE agy session with the profile's own
@@ -117,6 +151,26 @@ function childEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(Deno.env.toObject())) {
     if (!CHILD_ENV_BLOCKLIST.has(k)) env[k] = v;
+  }
+  return env;
+}
+
+const WORKSPACE_CHILD_ENV_ALLOWLIST = [
+  "HOME",
+  "PATH",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+  "DBUS_SESSION_BUS_ADDRESS",
+  "XDG_RUNTIME_DIR",
+] as const;
+
+function workspaceChildEnv(): Record<string, string> {
+  const source = Deno.env.toObject();
+  const env: Record<string, string> = {};
+  for (const key of WORKSPACE_CHILD_ENV_ALLOWLIST) {
+    const value = source[key];
+    if (value !== undefined) env[key] = value;
   }
   return env;
 }
@@ -388,8 +442,12 @@ When finished, your final message must be the complete deliverable requested:
 self-contained and ready to be consumed by an orchestrator without further
 context.`;
 
-function renderAutonomousPrompt(req: OAIChatRequest): RenderedPrompt {
+function renderAutonomousPrompt(
+  req: OAIChatRequest,
+  trustedSystem?: string,
+): RenderedPrompt {
   const system: string[] = [];
+  if (trustedSystem) system.push(trustedSystem);
   for (const m of req.messages ?? []) {
     if (m.role === "system") {
       const text = textContent(m).trim();
@@ -613,6 +671,31 @@ interface AgyStreamHandlers {
   evict?: () => void;
 }
 
+interface AgyExecutionContext {
+  cwd?: string;
+  workspaceReadOnly?: boolean;
+}
+
+async function runWorkspacePolicy(action: "apply-ro" | "restore"): Promise<void> {
+  const child = new Deno.Command(WORKSPACE_POLICY_HELPER, {
+    args: [action],
+    stdout: "piped",
+    stderr: "piped",
+    stdin: "null",
+    env: childEnv(),
+    clearEnv: true,
+  }).spawn();
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.status,
+  ]);
+  if (!status.success) {
+    const detail = stderr.trim() || stdout.trim() || `exit code ${status.code}`;
+    throw new Error(`${action} failed: ${detail}`);
+  }
+}
+
 async function runAgy(
   model: string,
   prompt: string,
@@ -620,6 +703,7 @@ async function runAgy(
   signal?: AbortSignal,
   conversationId?: string,
   agent: string = AGY_AGENT,
+  execution: AgyExecutionContext = {},
 ): Promise<AgyResult> {
   const release = await acquire();
   const started = Date.now();
@@ -628,8 +712,15 @@ async function runAgy(
   let watchdog: ReturnType<typeof setTimeout> | null = null;
   let onAbort: (() => void) | null = null;
   let abortListenerAdded = false;
+  let workspacePolicyApplied = false;
+  let workspaceChildStatus: Promise<Deno.CommandStatus> | null = null;
+  let workspaceChildKill: (() => void) | null = null;
 
   try {
+    if (execution.workspaceReadOnly) {
+      await runWorkspacePolicy("apply-ro");
+      workspacePolicyApplied = true;
+    }
     const args = [
       "--agent",
       agent,
@@ -648,7 +739,8 @@ async function runAgy(
       stdout: "piped",
       stderr: "piped",
       stdin: "piped",
-      env: childEnv(),
+      cwd: execution.cwd,
+      env: execution.workspaceReadOnly ? workspaceChildEnv() : childEnv(),
       clearEnv: true,
     }).spawn();
 
@@ -657,6 +749,7 @@ async function runAgy(
     // agy keeps stdin open but never reads it.
     const stderrText = new Response(child.stderr).text().catch(() => "");
     const statusPromise = child.status;
+    if (execution.workspaceReadOnly) workspaceChildStatus = statusPromise;
     let exited = false;
     let escalateTimer: ReturnType<typeof setTimeout> | null = null;
     const clearEscalation = () => {
@@ -674,9 +767,9 @@ async function runAgy(
         child.kill("SIGTERM");
       } catch { /* already dead */ }
       if (escalateTimer === null) {
-        // This timer intentionally survives runAgy's outer finally. A child
-        // that ignores SIGTERM still needs SIGKILL after the request gate is
-        // released; child.status owns cancellation when the process exits.
+        // Default runs may release their request gate before this escalation.
+        // Workspace runs wait for child.status before restoring policy and
+        // releasing the concurrency slot.
         escalateTimer = setTimeout(() => {
           if (!exited) {
             try {
@@ -686,6 +779,7 @@ async function runAgy(
         }, 3_000);
       }
     };
+    if (execution.workspaceReadOnly) workspaceChildKill = killHard;
 
     let resolveAbort: ((value: "aborted") => void) | null = null;
     const abortPromise = signal
@@ -855,6 +949,27 @@ async function runAgy(
     if (signal && onAbort && abortListenerAdded) {
       signal.removeEventListener("abort", onAbort);
     }
+    if (workspacePolicyApplied && workspaceChildStatus) {
+      workspaceChildKill?.();
+      try {
+        await workspaceChildStatus;
+      } catch {
+        // The containment invariant needs terminal process state, not a
+        // successful exit code. runAgy records the actual request failure.
+      }
+    }
+    if (workspacePolicyApplied) {
+      try {
+        await runWorkspacePolicy("restore");
+      } catch (e) {
+        result.ok = false;
+        result.text = "";
+        result.error = `workspace policy restore failed: ${
+          e instanceof Error ? e.message : String(e)
+        }`;
+        console.error("workspace policy restore failed");
+      }
+    }
     release();
     const dur = (Date.now() - started) / 1000;
     await appendUsage({
@@ -934,10 +1049,21 @@ async function handleAutonomousChat(
   modelStr: string,
   auto: AutoRoute,
 ): Promise<Response> {
-  const prepared = renderAutonomousPrompt(body);
+  const workspaceReadOnly = WORKSPACE !== null && auto.profile === "ro";
+  const selectedAgent = workspaceReadOnly ? WORKSPACE_AGENT : auto.agent;
+  const execution: AgyExecutionContext = workspaceReadOnly
+    ? { cwd: WORKSPACE.root, workspaceReadOnly: true }
+    : {};
+  const prepared = renderAutonomousPrompt(
+    body,
+    workspaceReadOnly ? WORKSPACE_CONTRACT : undefined,
+  );
   const log = {
     autonomous: auto.profile,
-    agent: auto.agent,
+    agent: selectedAgent,
+    ...(workspaceReadOnly
+      ? { workspace_enabled: true, workspace_mode: "ro", workspace_root: "/workspace" }
+      : {}),
     msgs: body.messages?.length ?? 0,
     prompt_chars: prepared.prompt.length,
     tools_chars: 0,
@@ -955,7 +1081,8 @@ async function handleAutonomousChat(
       { log },
       req.signal,
       undefined,
-      auto.agent,
+      selectedAgent,
+      execution,
     );
     if (!r.ok) return jsonError(502, r.error ?? "agy failed");
     return Response.json({
@@ -1012,7 +1139,7 @@ async function handleAutonomousChat(
         const r = await runAgy(auto.real, streamingPrompt, {
           onDelta: (kind, d) => classifier.onDelta(kind, d),
           log,
-        }, req.signal, undefined, auto.agent);
+        }, req.signal, undefined, selectedAgent, execution);
         classifier.flush();
         if (!r.ok) {
           send({ error: { message: r.error ?? "agy failed", code: 502 } });
@@ -1073,6 +1200,12 @@ async function handleChat(req: Request): Promise<Response> {
   if (!model) return jsonError(400, "missing model");
   const auto = parseAutoModel(model);
   if (auto) {
+    if (WORKSPACE && auto.profile === "rw") {
+      return jsonError(
+        403,
+        "workspace is read-only; read-write host workspace support is not enabled",
+      );
+    }
     const declared = groupBases(modelSlugs);
     // All accepted body signals (flat reasoning_effort, nested
     // reasoning.effort, variant) funnel through variantSignals; the slug

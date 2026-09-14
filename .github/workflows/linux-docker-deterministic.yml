@@ -3,20 +3,34 @@ name: Linux Docker deterministic
 on:
   push:
     branches:
-      - "impl/docker-verifier-docs"
+      - "impl/pr3-explicit-host-workspace-ro"
     paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "agy-bridge.ts"
+      - "compose*.yaml"
+      - "agents/**"
+      - "docker/**"
+      - "tests/**"
       - ".github/workflows/linux-docker-deterministic.yml"
       - "docker/tests/**"
       - "docs/docker-compose.md"
   pull_request:
     paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "agy-bridge.ts"
+      - "compose*.yaml"
+      - "agents/**"
+      - "docker/**"
+      - "tests/**"
       - ".github/workflows/linux-docker-deterministic.yml"
       - "docker/tests/**"
       - "docs/docker-compose.md"
   workflow_dispatch:
     inputs:
       base_ref:
-        description: Frozen PR2 runtime commit SHA
+        description: Frozen main runtime commit SHA
         required: true
         type: string
 
@@ -41,7 +55,7 @@ jobs:
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           PUSH_HEAD_SHA: ${{ github.sha }}
           PUSH_REPOSITORY: ${{ github.repository }}
-          FROZEN_BASE_REF: bcf2f2532be7d32a78167d745a700f8a480114e0
+          FROZEN_BASE_REF: f5ae309fd1cfe11653753d9b62eb7da19abac767
           DISPATCH_HEAD_SHA: ${{ github.sha }}
           DISPATCH_BASE_REF: ${{ inputs.base_ref }}
           DISPATCH_REPOSITORY: ${{ github.repository }}
@@ -49,7 +63,7 @@ jobs:
           set -euo pipefail
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             head_sha="$PR_HEAD_SHA"
-            base_ref="$PR_BASE_SHA"
+            base_ref="$FROZEN_BASE_REF"
             head_repository="$PR_HEAD_REPOSITORY"
           elif [[ "$EVENT_NAME" == "push" ]]; then
             head_sha="$PUSH_HEAD_SHA"

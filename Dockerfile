@@ -10,6 +10,7 @@ RUN apt-get update \
       dbus \
       dbus-x11 \
       gnome-keyring \
+      jq \
       gzip \
       libsecret-tools \
       tar \
@@ -18,6 +19,7 @@ RUN apt-get update \
 
 RUN groupadd --gid 10001 agy \
  && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash agy \
+ && install -d -m 0755 -o agy -g agy /workspace \
  && install -d -m 0700 -o agy -g agy /home/agy/.cache \
  && install -d -m 0700 -o agy -g agy \
       /home/agy/.cache/deno \
@@ -48,6 +50,7 @@ WORKDIR /app
 COPY --chown=agy:agy . /app
 USER root
 RUN find /app/docker -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
+ && sed -i 's/\r$//' /app/docker/workspace/verified-agy-versions.txt \
  && chmod +x /app/docker/*.sh
 USER agy
 
