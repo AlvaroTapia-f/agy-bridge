@@ -116,8 +116,9 @@ assert_workspace_config_rejected() {
   fi
 }
 assert_workspace_config_rejected bad-root /not-workspace ro 1
-assert_workspace_config_rejected bad-mode /workspace rw 1
+assert_workspace_config_rejected bad-mode /workspace invalid 1
 assert_workspace_config_rejected bad-concurrency /workspace ro 2
+assert_workspace_config_rejected bad-rw-concurrency /workspace rw 2
 
 # ----- explicit read-only workspace runtime -----
 rm -f "$work"/agy-{input.ndjson,args.txt,cwd.txt,env.txt,count.txt}
@@ -236,4 +237,129 @@ assert_eq "$code" 502
 stop_bridge
 unset PRINT_TIMEOUT AGY_HARD_MARGIN_MS
 
-echo "PASS: bridge default regression and explicit read-only workspace runtime"
+# ----- explicit read-write workspace runtime -----
+rm -f "$work"/agy-{input.ndjson,args.txt,cwd.txt,env.txt,count.txt}
+export AGY_WORKSPACE_ROOT=/workspace
+export AGY_WORKSPACE_MODE=rw
+export AGY_WORKSPACE_HOST_PATH='HOST_PATH_MUST_NOT_REACH_CHILD'
+export AGY_WORKSPACE_BRIDGE_CANARY='BRIDGE_CANARY_MUST_NOT_REACH_CHILD'
+export AGY_SECRETS_DIR="$work/rw-secrets"
+export KEYRING_PASSWORD_FILE="$work/rw-keyring-password"
+mkdir -p "$AGY_SECRETS_DIR"
+start_bridge 17424
+
+workspace_rw_ro="$(curl -fsS \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-ro-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"Inspect the caller project read-only."}]}' \
+  http://127.0.0.1:17424/v1/chat/completions)"
+[[ "$workspace_rw_ro" == *'fake reply'* ]] || fail "RW deployment auto-ro reply missing"
+rw_ro_args="$(cat "$HOME/fake-agy-args.txt")"
+[[ "$rw_ro_args" == *'--agent agy-bridge-worker-ro-v1'* ]] || fail "RW deployment auto-ro did not use reserved RO agent"
+assert_eq "$(cat "$HOME/fake-agy-cwd.txt")" /workspace
+rw_ro_env="$HOME/fake-agy-env.txt"
+for secret_name in AGY_TOKEN AGY_SECRETS_DIR KEYRING_PASSWORD_FILE STATE_DIR AGY_WORKSPACE_HOST_PATH AGY_WORKSPACE_ROOT AGY_WORKSPACE_MODE AGY_WORKSPACE_BRIDGE_CANARY; do
+  ! grep -q "^${secret_name}=" "$rw_ro_env" || fail "RW deployment auto-ro child leaked $secret_name"
+done
+grep -q '^HOME=' "$rw_ro_env" || fail "RW deployment auto-ro child missing HOME"
+grep -q '^PATH=' "$rw_ro_env" || fail "RW deployment auto-ro child missing PATH"
+
+workspace_rw="$(curl -fsS \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-rw-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"Modify the caller project."}]}' \
+  http://127.0.0.1:17424/v1/chat/completions)"
+[[ "$workspace_rw" == *'fake reply'* ]] || fail "RW deployment auto-rw reply missing"
+rw_args="$(cat "$HOME/fake-agy-args.txt")"
+[[ "$rw_args" == *'--agent agy-bridge-worker-rw-v1'* ]] || fail "RW deployment auto-rw did not use reserved RW agent"
+assert_eq "$(cat "$HOME/fake-agy-cwd.txt")" /workspace
+rw_prompt="$(deno eval --allow-read="$HOME/fake-agy-input.ndjson" '
+  const raw = await Deno.readTextFile(Deno.args[0]);
+  const ev = JSON.parse(raw.trim());
+  console.log(ev.message?.content ?? "");
+' "$HOME/fake-agy-input.ndjson")"
+[[ "$rw_prompt" == *'The operator explicitly exposed one caller project at /workspace in read-write mode.'* ]] || fail "RW contract mode/root missing"
+[[ "$rw_prompt" == *'Treat /workspace as the only caller project root.'* ]] || fail "RW contract sole root missing"
+[[ "$rw_prompt" == *'Do not treat /app, HOME, the bridge process directory, bridge state, configuration, keyring data, or secrets as caller project files.'* ]] || fail "RW contract non-workspace boundary missing"
+[[ "$rw_prompt" == *'You may read, create, and replace project file contents only within /workspace.'* ]] || fail "RW contract file capability missing"
+[[ "$rw_prompt" == *'This agent has no shell-command capability and no generic file-delete capability.'* ]] || fail "RW contract command/delete boundary missing"
+rw_env="$HOME/fake-agy-env.txt"
+for secret_name in AGY_TOKEN AGY_SECRETS_DIR KEYRING_PASSWORD_FILE STATE_DIR AGY_WORKSPACE_HOST_PATH AGY_WORKSPACE_ROOT AGY_WORKSPACE_MODE AGY_WORKSPACE_BRIDGE_CANARY; do
+  ! grep -q "^${secret_name}=" "$rw_env" || fail "RW workspace child leaked $secret_name"
+done
+grep -q '^HOME=' "$rw_env" || fail "RW workspace child missing HOME"
+grep -q '^PATH=' "$rw_env" || fail "RW workspace child missing PATH"
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "RW workspace policy backup remained after successful request"
+
+# RW abort must keep the write policy applied only while the child is active,
+# then restore it before the MAX_CONCURRENT=1 slot can be reused.
+count_before="$(cat "$HOME/fake-agy-count.txt")"
+curl -sS -o "$work/rw-aborted-request.json" \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-rw-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"FAKE_HANG"}]}' \
+  http://127.0.0.1:17424/v1/chat/completions \
+  >"$work/rw-aborted-request.out" 2>"$work/rw-aborted-request.err" &
+rw_abort_client_pid=$!
+
+rw_abort_spawned=0
+for _ in $(seq 1 100); do
+  if [[ -f "$HOME/fake-agy-count.txt" ]]; then
+    count_now="$(cat "$HOME/fake-agy-count.txt")"
+    if (( count_now > count_before )); then
+      rw_abort_spawned=1
+      break
+    fi
+  fi
+  sleep 0.05
+done
+(( rw_abort_spawned == 1 )) || fail "aborted RW workspace request never spawned fake agy"
+[[ -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "RW workspace policy backup missing while aborted request was active"
+jq -e '.permissions.allow | index("write_file(/workspace)") != null' \
+  "$HOME/.gemini/antigravity-cli/settings.json" >/dev/null || fail "RW write policy not active during request"
+
+kill "$rw_abort_client_pid" 2>/dev/null || true
+wait "$rw_abort_client_pid" 2>/dev/null || true
+
+rw_abort_restored=0
+for _ in $(seq 1 80); do
+  if [[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]]; then
+    rw_abort_restored=1
+    break
+  fi
+  sleep 0.1
+done
+(( rw_abort_restored == 1 )) || fail "RW workspace policy backup remained after client abort"
+
+after_rw_abort="$(curl -fsS \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-rw-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"Reply after RW abort cleanup."}]}' \
+  http://127.0.0.1:17424/v1/chat/completions)"
+[[ "$after_rw_abort" == *'fake reply'* ]] || fail "RW workspace concurrency slot was not released after client abort"
+
+# Natural RW child failure must restore the shared policy transaction.
+code="$(curl -sS -o "$work/rw-child-failure.json" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-rw-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"FAKE_CHILD_FAILURE"}]}' \
+  http://127.0.0.1:17424/v1/chat/completions)"
+assert_eq "$code" 502
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "RW workspace policy backup remained after child failure"
+stop_bridge
+
+# RW hard-deadline cleanup follows the same terminal-child-before-restore path.
+export PRINT_TIMEOUT=1ms
+export AGY_HARD_MARGIN_MS=50
+start_bridge 17425
+code="$(curl -sS -o "$work/rw-hard-deadline.json" -w '%{http_code}' \
+  -H 'content-type: application/json' \
+  -H "Authorization: Bearer $AGY_TOKEN" \
+  -d '{"model":"auto-rw-gemini-test","reasoning_effort":"high","messages":[{"role":"user","content":"FAKE_HANG"}]}' \
+  http://127.0.0.1:17425/v1/chat/completions)"
+assert_eq "$code" 502
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "RW workspace policy backup remained after hard deadline"
+stop_bridge
+unset PRINT_TIMEOUT AGY_HARD_MARGIN_MS
+
+echo "PASS: bridge default regression and explicit RO/RW workspace runtime"

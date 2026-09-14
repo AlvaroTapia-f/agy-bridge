@@ -77,7 +77,7 @@ fi
 
 agents_dir="$HOME/.gemini/config/agents"
 mkdir -p "$agents_dir"
-for profile in raw worker-ro worker-rw agy-bridge-worker-ro-v1; do
+for profile in raw worker-ro worker-rw agy-bridge-worker-ro-v1 agy-bridge-worker-rw-v1; do
   src="/app/agents/$profile/agent.md"
   dst_dir="$agents_dir/$profile"
   [[ -f "$src" ]] || { echo "missing managed agent: $src" >&2; exit 66; }

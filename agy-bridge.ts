@@ -55,7 +55,7 @@ const STATE_DIR = Deno.env.get("STATE_DIR") ??
   `${Deno.env.get("HOME")}/.local/state/agy-bridge`;
 const USAGE_LOG = `${STATE_DIR}/usage.jsonl`;
 
-type WorkspaceMode = "ro";
+type WorkspaceMode = "ro" | "rw";
 
 interface WorkspaceConfig {
   root: "/workspace";
@@ -69,8 +69,8 @@ function loadWorkspaceConfig(): WorkspaceConfig | null {
   if (root !== "/workspace") {
     throw new Error("AGY_WORKSPACE_ROOT must be /workspace");
   }
-  if (mode !== "ro") {
-    throw new Error("AGY_WORKSPACE_MODE must be ro");
+  if (mode !== "ro" && mode !== "rw") {
+    throw new Error("AGY_WORKSPACE_MODE must be ro or rw");
   }
   if (MAX_CONCURRENT !== 1) {
     throw new Error("workspace mode requires MAX_CONCURRENT=1");
@@ -79,15 +79,23 @@ function loadWorkspaceConfig(): WorkspaceConfig | null {
 }
 
 const WORKSPACE = loadWorkspaceConfig();
-const WORKSPACE_AGENT = "agy-bridge-worker-ro-v1";
+const WORKSPACE_RO_AGENT = "agy-bridge-worker-ro-v1";
+const WORKSPACE_RW_AGENT = "agy-bridge-worker-rw-v1";
 const WORKSPACE_POLICY_HELPER = "/app/docker/workspace-policy.sh";
-const WORKSPACE_CONTRACT = `# Bridge workspace contract
+const WORKSPACE_RO_CONTRACT = `# Bridge workspace contract
 
 The operator explicitly exposed one caller project at /workspace in read-only mode.
 Treat /workspace as the caller project root.
 Do not treat /app, HOME, the bridge process directory, bridge state, configuration, keyring data, or secrets as caller project files.
 Use project filesystem tools only within /workspace.
 The workspace is read-only. Never create, modify, delete, or execute project files.`;
+const WORKSPACE_RW_CONTRACT = `# Bridge workspace contract
+
+The operator explicitly exposed one caller project at /workspace in read-write mode.
+Treat /workspace as the only caller project root.
+Do not treat /app, HOME, the bridge process directory, bridge state, configuration, keyring data, or secrets as caller project files.
+You may read, create, and replace project file contents only within /workspace.
+This agent has no shell-command capability and no generic file-delete capability.`;
 
 // ---------- autonomous delegation (models prefixed "auto-<profile>-") ----------
 //
@@ -671,12 +679,16 @@ interface AgyStreamHandlers {
   evict?: () => void;
 }
 
-interface AgyExecutionContext {
-  cwd?: string;
-  workspaceReadOnly?: boolean;
+interface WorkspaceExecution {
+  root: "/workspace";
+  mode: WorkspaceMode;
 }
 
-async function runWorkspacePolicy(action: "apply-ro" | "restore"): Promise<void> {
+interface AgyExecutionContext {
+  workspace?: WorkspaceExecution;
+}
+
+async function runWorkspacePolicy(action: "apply-ro" | "apply-rw" | "restore"): Promise<void> {
   const child = new Deno.Command(WORKSPACE_POLICY_HELPER, {
     args: [action],
     stdout: "piped",
@@ -715,10 +727,15 @@ async function runAgy(
   let workspacePolicyApplied = false;
   let workspaceChildStatus: Promise<Deno.CommandStatus> | null = null;
   let workspaceChildKill: (() => void) | null = null;
+  const workspace = execution.workspace;
 
   try {
-    if (execution.workspaceReadOnly) {
-      await runWorkspacePolicy("apply-ro");
+    if (workspace) {
+      if (workspace.mode === "ro") {
+        await runWorkspacePolicy("apply-ro");
+      } else {
+        await runWorkspacePolicy("apply-rw");
+      }
       workspacePolicyApplied = true;
     }
     const args = [
@@ -739,8 +756,8 @@ async function runAgy(
       stdout: "piped",
       stderr: "piped",
       stdin: "piped",
-      cwd: execution.cwd,
-      env: execution.workspaceReadOnly ? workspaceChildEnv() : childEnv(),
+      cwd: workspace?.root,
+      env: workspace ? workspaceChildEnv() : childEnv(),
       clearEnv: true,
     }).spawn();
 
@@ -749,7 +766,7 @@ async function runAgy(
     // agy keeps stdin open but never reads it.
     const stderrText = new Response(child.stderr).text().catch(() => "");
     const statusPromise = child.status;
-    if (execution.workspaceReadOnly) workspaceChildStatus = statusPromise;
+    if (workspace) workspaceChildStatus = statusPromise;
     let exited = false;
     let escalateTimer: ReturnType<typeof setTimeout> | null = null;
     const clearEscalation = () => {
@@ -779,7 +796,7 @@ async function runAgy(
         }, 3_000);
       }
     };
-    if (execution.workspaceReadOnly) workspaceChildKill = killHard;
+    if (workspace) workspaceChildKill = killHard;
 
     let resolveAbort: ((value: "aborted") => void) | null = null;
     const abortPromise = signal
@@ -1049,20 +1066,33 @@ async function handleAutonomousChat(
   modelStr: string,
   auto: AutoRoute,
 ): Promise<Response> {
-  const workspaceReadOnly = WORKSPACE !== null && auto.profile === "ro";
-  const selectedAgent = workspaceReadOnly ? WORKSPACE_AGENT : auto.agent;
-  const execution: AgyExecutionContext = workspaceReadOnly
-    ? { cwd: WORKSPACE.root, workspaceReadOnly: true }
-    : {};
+  const workspace: WorkspaceExecution | undefined = WORKSPACE === null
+    ? undefined
+    : auto.profile === "ro"
+    ? { root: WORKSPACE.root, mode: "ro" }
+    : auto.profile === "rw" && WORKSPACE.mode === "rw"
+    ? { root: WORKSPACE.root, mode: "rw" }
+    : undefined;
+  const selectedAgent = workspace?.mode === "ro"
+    ? WORKSPACE_RO_AGENT
+    : workspace?.mode === "rw"
+    ? WORKSPACE_RW_AGENT
+    : auto.agent;
+  const execution: AgyExecutionContext = workspace ? { workspace } : {};
+  const workspaceContract = workspace?.mode === "ro"
+    ? WORKSPACE_RO_CONTRACT
+    : workspace?.mode === "rw"
+    ? WORKSPACE_RW_CONTRACT
+    : undefined;
   const prepared = renderAutonomousPrompt(
     body,
-    workspaceReadOnly ? WORKSPACE_CONTRACT : undefined,
+    workspaceContract,
   );
   const log = {
     autonomous: auto.profile,
     agent: selectedAgent,
-    ...(workspaceReadOnly
-      ? { workspace_enabled: true, workspace_mode: "ro", workspace_root: "/workspace" }
+    ...(workspace
+      ? { workspace_enabled: true, workspace_mode: workspace.mode, workspace_root: workspace.root }
       : {}),
     msgs: body.messages?.length ?? 0,
     prompt_chars: prepared.prompt.length,
@@ -1200,7 +1230,7 @@ async function handleChat(req: Request): Promise<Response> {
   if (!model) return jsonError(400, "missing model");
   const auto = parseAutoModel(model);
   if (auto) {
-    if (WORKSPACE && auto.profile === "rw") {
+    if (WORKSPACE?.mode === "ro" && auto.profile === "rw") {
       return jsonError(
         403,
         "workspace is read-only; read-write host workspace support is not enabled",
