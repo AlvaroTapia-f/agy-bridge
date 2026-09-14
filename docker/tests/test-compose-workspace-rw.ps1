@@ -135,7 +135,7 @@ try {
   Assert-StartupRejected -Name 'rw-agent-collision' -Workspace $workspace -Root '/workspace' -Mode 'rw' -MaxConcurrent '1' -WorkspaceMount 'rw' -Expected 'workspace contains reserved agent collision'
   Remove-Item -Recurse -Force (Join-Path $workspace '.agents')
 
-  Assert-StartupRejected -Name 'rw-version-not-verified' -Workspace $workspace -Root '/workspace' -Mode 'rw' -MaxConcurrent '1' -WorkspaceMount 'rw' -Expected 'agy 1.2.2 is not verified for explicit read-write host workspace mode'
+  Assert-StartupRejected -Name 'rw-version-not-verified' -Workspace $workspace -Root '/workspace' -Mode 'rw' -MaxConcurrent '1' -WorkspaceMount 'rw' -AgyBin 'deno' -Expected 'agy 2.9.6 is not verified for explicit read-write host workspace mode'
   Assert-StartupRejected -Name 'ro-mounted-rw' -Workspace $workspace -Root '/workspace' -Mode 'ro' -MaxConcurrent '1' -WorkspaceMount 'rw' -Expected 'read-only workspace mount must be read-only'
   Assert-StartupRejected -Name 'ro-version-allowlist' -Workspace $workspace -Root '/workspace' -Mode 'ro' -MaxConcurrent '1' -WorkspaceMount 'ro' -AgyBin 'deno' -Expected 'agy 2.9.6 is not verified for explicit read-only host workspace mode'
 
