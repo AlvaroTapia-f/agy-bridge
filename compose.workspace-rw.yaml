@@ -1,0 +1,17 @@
+services:
+  agy-bridge:
+    environment:
+      AGY_WORKSPACE_ROOT: /workspace
+      AGY_WORKSPACE_MODE: rw
+      MAX_CONCURRENT: "1"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /home/agy/.cache
+    volumes:
+      - type: bind
+        source: ${AGY_WORKSPACE_HOST_PATH:?AGY_WORKSPACE_HOST_PATH must be set}
+        target: /workspace
+        read_only: false
+        bind:
+          create_host_path: false

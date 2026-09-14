@@ -1,0 +1,5 @@
+# Exact agy versions staged for explicit read-write workspace verification.
+#
+# A version entry is only a candidate until the authoritative full live
+# verifier passes on the exact final commit SHA that contains that entry.
+# Do not infer RW support from the separate read-only version allowlist.

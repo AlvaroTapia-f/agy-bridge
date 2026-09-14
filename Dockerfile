@@ -51,6 +51,7 @@ COPY --chown=agy:agy . /app
 USER root
 RUN find /app/docker -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
  && sed -i 's/\r$//' /app/docker/workspace/verified-agy-versions.txt \
+ && sed -i 's/\r$//' /app/docker/workspace/verified-rw-agy-versions.txt \
  && chmod +x /app/docker/*.sh
 USER agy
 

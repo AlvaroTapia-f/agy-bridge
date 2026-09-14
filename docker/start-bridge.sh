@@ -6,7 +6,6 @@ AGY_SECRETS_DIR="${AGY_SECRETS_DIR:-/home/agy/.local/share/agy-secrets}"
 STATE_DIR="${STATE_DIR:-/home/agy/.local/state/agy-bridge}"
 bridge_token_file="$AGY_SECRETS_DIR/bridge_token"
 keyring_password_file="$AGY_SECRETS_DIR/keyring_password"
-verified_versions_file="/app/docker/workspace/verified-agy-versions.txt"
 
 [[ -s "$bridge_token_file" ]] || { echo "missing bridge token" >&2; exit 70; }
 [[ -s "$keyring_password_file" ]] || { echo "missing keyring password" >&2; exit 70; }
@@ -31,35 +30,63 @@ if [[ -n "${AGY_WORKSPACE_ROOT:-}" || -n "${AGY_WORKSPACE_MODE:-}" ]]; then
     echo "workspace mode requires AGY_WORKSPACE_ROOT=/workspace" >&2
     exit 65
   }
-  [[ "${AGY_WORKSPACE_MODE:-}" == "ro" ]] || {
-    echo "workspace mode requires AGY_WORKSPACE_MODE=ro" >&2
-    exit 65
-  }
+  case "${AGY_WORKSPACE_MODE:-}" in
+    ro|rw) workspace_mode="$AGY_WORKSPACE_MODE" ;;
+    *) echo "workspace mode requires AGY_WORKSPACE_MODE=ro or rw" >&2; exit 65 ;;
+  esac
   [[ "${MAX_CONCURRENT:-}" == "1" ]] || {
     echo "workspace mode requires MAX_CONCURRENT=1" >&2
     exit 65
   }
   [[ -d /workspace ]] || { echo "workspace mount target is missing" >&2; exit 65; }
 
+  root_mount_options="$(awk '$5 == "/" { print $6; exit }' /proc/self/mountinfo)"
+  case ",$root_mount_options," in
+    *,ro,*) ;;
+    *) echo "container root filesystem must be read-only" >&2; exit 65 ;;
+  esac
+
   mount_options="$(awk '$5 == "/workspace" { print $6; exit }' /proc/self/mountinfo)"
   [[ -n "$mount_options" ]] || {
     echo "workspace mode requires /workspace to be a distinct mount" >&2
     exit 65
   }
-  case ",$mount_options," in
-    *,ro,*) ;;
-    *) echo "workspace mount must be read-only" >&2; exit 65 ;;
-  esac
+  if [[ "$workspace_mode" == "ro" ]]; then
+    case ",$mount_options," in
+      *,ro,*) ;;
+      *) echo "read-only workspace mount must be read-only" >&2; exit 65 ;;
+    esac
+  else
+    case ",$mount_options," in
+      *,rw,*) ;;
+      *) echo "read-write workspace mount must be writable" >&2; exit 65 ;;
+    esac
+  fi
 
-  for collision in \
+  workspace_collisions=(
     /workspace/.agents/agents/agy-bridge-worker-ro-v1.md \
-    /workspace/.agents/agents/agy-bridge-worker-ro-v1/agent.md; do
+    /workspace/.agents/agents/agy-bridge-worker-ro-v1/agent.md
+  )
+  if [[ "$workspace_mode" == "rw" ]]; then
+    workspace_collisions+=(
+      /workspace/.agents/agents/agy-bridge-worker-rw-v1.md
+      /workspace/.agents/agents/agy-bridge-worker-rw-v1/agent.md
+    )
+  fi
+  for collision in "${workspace_collisions[@]}"; do
     [[ ! -e "$collision" ]] || {
       echo "workspace contains reserved agent collision: $collision" >&2
       exit 65
     }
   done
 
+  if [[ "$workspace_mode" == "ro" ]]; then
+    verified_versions_file="/app/docker/workspace/verified-agy-versions.txt"
+    workspace_mode_label="read-only"
+  else
+    verified_versions_file="/app/docker/workspace/verified-rw-agy-versions.txt"
+    workspace_mode_label="read-write"
+  fi
   [[ -f "$verified_versions_file" ]] || {
     echo "workspace verified-version allowlist is missing" >&2
     exit 65
@@ -70,7 +97,7 @@ if [[ -n "${AGY_WORKSPACE_ROOT:-}" || -n "${AGY_WORKSPACE_MODE:-}" ]]; then
     exit 65
   }
   grep -Fx -- "$agy_version" "$verified_versions_file" >/dev/null || {
-    echo "agy $agy_version is not verified for explicit host workspace mode" >&2
+    echo "agy $agy_version is not verified for explicit $workspace_mode_label host workspace mode" >&2
     exit 65
   }
 fi
@@ -86,7 +113,7 @@ for profile in raw worker-ro worker-rw agy-bridge-worker-ro-v1 agy-bridge-worker
 done
 
 if [[ "$workspace_enabled" == true ]]; then
-  echo "workspace_enabled=true workspace_mode=ro workspace_root=/workspace"
+  echo "workspace_enabled=true workspace_mode=$workspace_mode workspace_root=/workspace"
 fi
 
 exec /app/docker/keyring-session.sh bash -lc '
