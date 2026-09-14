@@ -358,7 +358,7 @@ interface WorkspaceConfig {
 
 interface WorkspaceExecution {
   root: "/workspace";
-  access: WorkspaceMode;
+  mode: WorkspaceMode;
 }
 
 interface AgyExecutionContext {
@@ -387,7 +387,7 @@ const workspace = execution.workspace;
 
 if (workspace) {
   await runWorkspacePolicy(
-    workspace.access === "ro" ? "apply-ro" : "apply-rw",
+    workspace.mode === "ro" ? "apply-ro" : "apply-rw",
   );
   workspacePolicyApplied = true;
 }
