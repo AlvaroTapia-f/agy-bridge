@@ -636,6 +636,18 @@ try {
     ) | Out-Null
   }
 
+  Invoke-Gate -Name 'Explicit read-write workspace Compose and startup boundary' -Action {
+    $rwComposePath = Join-Path (Get-Location) 'compose.workspace-rw.yaml'
+    if (-not (Test-Path -LiteralPath $rwComposePath)) {
+      throw 'compose.workspace-rw.yaml is missing'
+    }
+    $rwAllowlistPath = Join-Path (Get-Location) 'docker/workspace/verified-rw-agy-versions.txt'
+    if (-not (Test-Path -LiteralPath $rwAllowlistPath)) {
+      throw 'verified-rw-agy-versions.txt is missing'
+    }
+    & (Join-Path $PSScriptRoot 'test-compose-workspace-rw.ps1')
+  }
+
   Invoke-Gate -Name 'Deno lint inside Docker' -Action {
     # docker compose --profile test run --rm -v <checkout> -w /workspace test deno lint
     Invoke-DockerCapture -ArgumentList @(

@@ -6,9 +6,11 @@ production_files=(
   "Dockerfile"
   "compose.yaml"
   "compose.workspace.yaml"
+  "compose.workspace-rw.yaml"
   "docker/start-bridge.sh"
   "docker/workspace-policy.sh"
   "agents/agy-bridge-worker-ro-v1/agent.md"
+  "agents/agy-bridge-worker-rw-v1/agent.md"
 )
 
 forbidden_patterns=(
@@ -35,6 +37,16 @@ for pattern in "${forbidden_patterns[@]}"; do
     failed=1
   fi
 done
+
+if grep -nF -- 'run_command' agents/agy-bridge-worker-rw-v1/agent.md; then
+  echo 'dedicated RW workspace agent must not expose run_command' >&2
+  failed=1
+fi
+
+if grep -nF -- 'command(' docker/workspace-policy.sh; then
+  echo 'workspace production policy must not contain command permissions' >&2
+  failed=1
+fi
 
 if (( failed != 0 )); then
   exit 1

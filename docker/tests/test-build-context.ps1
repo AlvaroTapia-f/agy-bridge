@@ -51,6 +51,7 @@ $canaries = @(
   "agents/worker-ro/LOCAL-ONLY-BUILD-CONTEXT-CANARY-$canaryId.txt",
   "agents/worker-rw/LOCAL-ONLY-BUILD-CONTEXT-CANARY-$canaryId.txt",
   "agents/agy-bridge-worker-ro-v1/LOCAL-ONLY-BUILD-CONTEXT-CANARY-$canaryId.txt",
+  "agents/agy-bridge-worker-rw-v1/LOCAL-ONLY-BUILD-CONTEXT-CANARY-$canaryId.txt",
   "docker/workspace/LOCAL-ONLY-BUILD-CONTEXT-CANARY-$canaryId.txt",
   '.env',
   ".env.dockerignore-canary-$canaryId",
@@ -118,7 +119,17 @@ try {
       throw "dockerignore leak: $relative was copied into the build context image"
     }
   }
-  foreach ($control in @('agy-bridge.ts', '.env.example', 'agents/agy-bridge-worker-ro-v1/agent.md', 'docker/workspace-policy.sh', 'docker/workspace/verified-agy-versions.txt')) {
+  foreach ($control in @(
+    'agy-bridge.ts',
+    '.env.example',
+    'agents/agy-bridge-worker-ro-v1/agent.md',
+    'agents/agy-bridge-worker-rw-v1/agent.md',
+    'compose.workspace.yaml',
+    'compose.workspace-rw.yaml',
+    'docker/workspace-policy.sh',
+    'docker/workspace/verified-agy-versions.txt',
+    'docker/workspace/verified-rw-agy-versions.txt'
+  )) {
     if (-not (Test-Path (Join-Path $tempRoot $control))) {
       throw "control failure: $control was not copied into the build context image"
     }
