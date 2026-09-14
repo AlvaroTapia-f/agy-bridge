@@ -57,14 +57,24 @@ atomic_json_write() {
 }
 
 apply_policy() {
-  local mode="$1" allow extra_deny
+  local mode="$1" allow trusted_workspaces extra_deny
   case "$mode" in
+    none)
+      allow='[]'
+      trusted_workspaces='[]'
+      extra_deny='[
+        "read_file(/workspace)",
+        "write_file(/workspace)"
+      ]'
+      ;;
     ro)
       allow='["read_file(/workspace)"]'
+      trusted_workspaces='["/workspace"]'
       extra_deny='[]'
       ;;
     rw)
       allow='["read_file(/workspace)","write_file(/workspace)"]'
+      trusted_workspaces='["/workspace"]'
       extra_deny='[
         "write_file(/workspace/.agents/agents/agy-bridge-worker-ro-v1.md)",
         "write_file(/workspace/.agents/agents/agy-bridge-worker-ro-v1/agent.md)",
@@ -101,9 +111,9 @@ apply_policy() {
     ')"
   atomic_json_write "$backup_file" "$backup"
 
-  updated="$(jq --argjson allow "$allow" --argjson extra_deny "$extra_deny" '
+  updated="$(jq --argjson allow "$allow" --argjson trusted_workspaces "$trusted_workspaces" --argjson extra_deny "$extra_deny" '
     .allowNonWorkspaceAccess = false
-    | .trustedWorkspaces = ["/workspace"]
+    | .trustedWorkspaces = $trusted_workspaces
     | .toolPermission = "request-review"
     | .permissions = {
         allow: $allow,
@@ -167,6 +177,9 @@ case "$action" in
   assert-agent-paths-rw)
     assert_agent_paths rw
     ;;
+  apply-none)
+    apply_policy none
+    ;;
   apply-ro)
     apply_policy ro
     ;;
@@ -180,6 +193,6 @@ case "$action" in
     if [[ -e "$backup_file" ]]; then restore_policy; fi
     ;;
   *)
-    fail "usage: $0 {assert-agent-paths-ro|assert-agent-paths-rw|apply-ro|apply-rw|restore|restore-if-needed}"
+    fail "usage: $0 {assert-agent-paths-ro|assert-agent-paths-rw|apply-none|apply-ro|apply-rw|restore|restore-if-needed}"
     ;;
 esac

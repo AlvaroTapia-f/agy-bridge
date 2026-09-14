@@ -62,6 +62,8 @@ required=(
   'Workspace host immutability'
   'Workspace auto-rw denial'
   'Workspace non-workspace canary denial'
+  'RO bare-route workspace isolation'
+  'RW bare-route workspace isolation'
   '/app/.workspace-app-canary/value.txt'
   '/workspace/../app/.workspace-app-canary/value.txt'
   'Get-WorkspaceFingerprint'

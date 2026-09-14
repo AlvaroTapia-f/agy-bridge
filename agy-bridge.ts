@@ -679,9 +679,11 @@ interface AgyStreamHandlers {
   evict?: () => void;
 }
 
+type WorkspaceAccess = "none" | WorkspaceMode;
+
 interface WorkspaceExecution {
   root: "/workspace";
-  mode: WorkspaceMode;
+  access: WorkspaceAccess;
 }
 
 interface AgyExecutionContext {
@@ -691,9 +693,16 @@ interface AgyExecutionContext {
 type WorkspacePolicyAction =
   | "assert-agent-paths-ro"
   | "assert-agent-paths-rw"
+  | "apply-none"
   | "apply-ro"
   | "apply-rw"
   | "restore";
+
+function bareExecutionContext(): AgyExecutionContext {
+  return WORKSPACE
+    ? { workspace: { root: WORKSPACE.root, access: "none" } }
+    : {};
+}
 
 async function runWorkspacePolicy(action: WorkspacePolicyAction): Promise<void> {
   const child = new Deno.Command(WORKSPACE_POLICY_HELPER, {
@@ -738,17 +747,21 @@ async function runAgy(
 
   try {
     if (workspace) {
-      try {
-        await runWorkspacePolicy(
-          workspace.mode === "ro" ? "assert-agent-paths-ro" : "assert-agent-paths-rw",
-        );
-      } catch (e) {
-        result.error = e instanceof Error ? e.message : String(e);
-        return result;
-      }
-      if (workspace.mode === "ro") {
-        await runWorkspacePolicy("apply-ro");
+      if (workspace.access === "none") {
+        await runWorkspacePolicy("apply-none");
       } else {
+        try {
+          await runWorkspacePolicy(
+            workspace.access === "ro" ? "assert-agent-paths-ro" : "assert-agent-paths-rw",
+          );
+        } catch (e) {
+          result.error = e instanceof Error ? e.message : String(e);
+          return result;
+        }
+      }
+      if (workspace.access === "ro") {
+        await runWorkspacePolicy("apply-ro");
+      } else if (workspace.access === "rw") {
         await runWorkspacePolicy("apply-rw");
       }
       workspacePolicyApplied = true;
@@ -771,7 +784,9 @@ async function runAgy(
       stdout: "piped",
       stderr: "piped",
       stdin: "piped",
-      cwd: workspace?.root,
+      cwd: workspace?.access === "ro" || workspace?.access === "rw"
+        ? workspace.root
+        : undefined,
       env: workspace ? workspaceChildEnv() : childEnv(),
       clearEnv: true,
     }).spawn();
@@ -1084,19 +1099,19 @@ async function handleAutonomousChat(
   const workspace: WorkspaceExecution | undefined = WORKSPACE === null
     ? undefined
     : auto.profile === "ro"
-    ? { root: WORKSPACE.root, mode: "ro" }
+    ? { root: WORKSPACE.root, access: "ro" }
     : auto.profile === "rw" && WORKSPACE.mode === "rw"
-    ? { root: WORKSPACE.root, mode: "rw" }
+    ? { root: WORKSPACE.root, access: "rw" }
     : undefined;
-  const selectedAgent = workspace?.mode === "ro"
+  const selectedAgent = workspace?.access === "ro"
     ? WORKSPACE_RO_AGENT
-    : workspace?.mode === "rw"
+    : workspace?.access === "rw"
     ? WORKSPACE_RW_AGENT
     : auto.agent;
   const execution: AgyExecutionContext = workspace ? { workspace } : {};
-  const workspaceContract = workspace?.mode === "ro"
+  const workspaceContract = workspace?.access === "ro"
     ? WORKSPACE_RO_CONTRACT
-    : workspace?.mode === "rw"
+    : workspace?.access === "rw"
     ? WORKSPACE_RW_CONTRACT
     : undefined;
   const prepared = renderAutonomousPrompt(
@@ -1107,7 +1122,7 @@ async function handleAutonomousChat(
     autonomous: auto.profile,
     agent: selectedAgent,
     ...(workspace
-      ? { workspace_enabled: true, workspace_mode: workspace.mode, workspace_root: workspace.root }
+      ? { workspace_enabled: true, workspace_mode: workspace.access, workspace_root: workspace.root }
       : {}),
     msgs: body.messages?.length ?? 0,
     prompt_chars: prepared.prompt.length,
@@ -1272,6 +1287,7 @@ async function handleChat(req: Request): Promise<Response> {
   const prepared = await preparePrompt(body, model);
   const { prompt } = prepared;
   const useTools = TOOLS_ENABLED && (body.tools?.length ?? 0) > 0;
+  const bareExecution = bareExecutionContext();
   const log = {
     continued: prepared.continued,
     msgs: body.messages?.length ?? 0,
@@ -1292,6 +1308,8 @@ async function handleChat(req: Request): Promise<Response> {
       { log, commit: prepared.commit, evict: prepared.evict },
       req.signal,
       prepared.conversationId,
+      AGY_AGENT,
+      bareExecution,
     );
     if (
       !r.ok && prepared.continued && r.failureKind === "natural"
@@ -1305,7 +1323,7 @@ async function handleChat(req: Request): Promise<Response> {
       r = await runAgy(model, fresh.prompt, {
         log: { ...log, continued: false },
         commit: fresh.commit,
-      }, req.signal);
+      }, req.signal, undefined, AGY_AGENT, bareExecution);
     }
     if (!r.ok) return jsonError(502, r.error ?? "agy failed");
     if (useTools) {
@@ -1386,6 +1404,8 @@ async function handleChat(req: Request): Promise<Response> {
             },
             req.signal,
             prepared.conversationId,
+            AGY_AGENT,
+            bareExecution,
           );
           classifier.flush();
           if (!r.ok) {
@@ -1410,7 +1430,7 @@ async function handleChat(req: Request): Promise<Response> {
             log,
             commit: prepared.commit,
             evict: prepared.evict,
-          }, req.signal, prepared.conversationId);
+          }, req.signal, prepared.conversationId, AGY_AGENT, bareExecution);
           classifier.flush();
           if (!r.ok) {
             send({ error: { message: r.error ?? "agy failed", code: 502 } });

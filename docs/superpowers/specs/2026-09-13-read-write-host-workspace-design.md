@@ -359,9 +359,11 @@ Replace the boolean-only execution interface with one explicit per-request
 workspace value:
 
 ```ts
+type WorkspaceAccess = "none" | WorkspaceMode;
+
 interface WorkspaceExecution {
   root: "/workspace";
-  mode: WorkspaceMode;
+  access: WorkspaceAccess;
 }
 
 interface AgyExecutionContext {
@@ -371,7 +373,7 @@ interface AgyExecutionContext {
 
 `runAgy()` derives all workspace-specific behavior from this value:
 
-- child CWD;
+- child CWD (`ro` / `rw` only; `none` does not use `/workspace` as CWD);
 - sanitized child environment;
 - policy action;
 - child termination/restore ordering.
@@ -380,21 +382,28 @@ Request routing resolves a per-request execution access from deployment mode:
 
 ```text
 no workspace deployment:
+  bare    -> no WorkspaceExecution
   auto-ro -> existing worker-ro
   auto-rw -> existing worker-rw
 
 RO deployment:
-  auto-ro -> workspace { root: /workspace, mode: ro }
+  bare    -> workspace { root: /workspace, access: none }
+  auto-ro -> workspace { root: /workspace, access: ro }
   auto-rw -> 403 before spawn
 
 RW deployment (deployment config remains mode=rw):
-  auto-ro -> execution workspace { root: /workspace, mode: ro }
-  auto-rw -> execution workspace { root: /workspace, mode: rw }
+  bare    -> workspace { root: /workspace, access: none }
+  auto-ro -> execution workspace { root: /workspace, access: ro }
+  auto-rw -> execution workspace { root: /workspace, access: rw }
 ```
 
-Routing is the only place that converts deployment capability plus request
-profile into `WorkspaceExecution`. Callers must not construct ad-hoc CWD/mode
-combinations.
+Every `agy` child spawned inside an RO/RW workspace deployment therefore has
+explicit request-level workspace access. Bare routes remain available, but
+`access=none` gives them no `/workspace` CWD, uses the sanitized workspace child
+environment, and applies a transactional deny-workspace policy. Bare routes do
+not receive the bridge-owned workspace contract prompt. Routing is the only
+place that converts deployment capability plus request profile into
+`WorkspaceExecution`; callers must not construct ad-hoc CWD/access combinations.
 
 This keeps the execution seam small: one explicit value carries the invariants
 instead of separate CWD/mode booleans that can form illegal combinations, while
@@ -475,6 +484,7 @@ The existing RO contract remains unchanged for `auto-ro-*` workspace requests.
 Generalize `docker/workspace-policy.sh` to support:
 
 ```text
+apply-none
 apply-ro
 apply-rw
 restore
@@ -489,6 +499,37 @@ trustedWorkspaces
 toolPermission
 permissions
 ```
+
+Bare routes in either workspace deployment use `apply-none`:
+
+```json
+{
+  "allowNonWorkspaceAccess": false,
+  "trustedWorkspaces": [],
+  "toolPermission": "request-review",
+  "permissions": {
+    "allow": [],
+    "deny": [
+      "read_file(/workspace)",
+      "write_file(/workspace)",
+      "read_file(/app)",
+      "write_file(/app)",
+      "read_file(/home/agy/.gemini)",
+      "write_file(/home/agy/.gemini)",
+      "read_file(/home/agy/.local/share/agy-secrets)",
+      "write_file(/home/agy/.local/share/agy-secrets)",
+      "read_file(/home/agy/.local/share/keyrings)",
+      "write_file(/home/agy/.local/share/keyrings)",
+      "read_file(/home/agy/.local/state/agy-bridge)",
+      "write_file(/home/agy/.local/state/agy-bridge)"
+    ]
+  }
+}
+```
+
+`apply-none` uses the same backup schema, nested-transaction guard, atomic
+settings write, restore ordering, corrupt-backup handling, and startup recovery
+as RO/RW policy transactions.
 
 RW policy for exact `agy 1.2.2`:
 

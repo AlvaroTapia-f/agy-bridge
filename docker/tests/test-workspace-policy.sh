@@ -93,6 +93,48 @@ run_case absent '__ABSENT__'
 run_case present '{"allowNonWorkspaceAccess":true,"trustedWorkspaces":["/old"],"toolPermission":"permissive","permissions":{"allow":["legacy"]},"unrelated":{"keep":1}}'
 run_case mixed '{"trustedWorkspaces":["/elsewhere"],"permissions":{"deny":["legacy-deny"]},"unrelated":"keep"}'
 
+# Bare routes in a workspace deployment use a transactional access=none policy
+# that denies the workspace as well as the existing non-workspace surfaces.
+export HOME="$work/none-policy/home" STATE_DIR="$work/none-policy/state"
+mkdir -p "$HOME/.gemini/antigravity-cli" "$STATE_DIR"
+printf '%s\n' '{"unrelated":{"keep":2}}' > "$HOME/.gemini/antigravity-cli/settings.json"
+cp "$HOME/.gemini/antigravity-cli/settings.json" "$work/none-policy-before.json"
+"$helper" apply-none
+[[ -f "$STATE_DIR/workspace-policy-backup.json" ]] || fail 'none policy backup missing'
+jq -e '
+  .unrelated == {"keep":2} and
+  .allowNonWorkspaceAccess == false and
+  .trustedWorkspaces == [] and
+  .toolPermission == "request-review" and
+  .permissions.allow == [] and
+  .permissions.deny == [
+    "read_file(/workspace)",
+    "write_file(/workspace)",
+    "read_file(/app)",
+    "write_file(/app)",
+    "read_file(/home/agy/.gemini)",
+    "write_file(/home/agy/.gemini)",
+    "read_file(/home/agy/.local/share/agy-secrets)",
+    "write_file(/home/agy/.local/share/agy-secrets)",
+    "read_file(/home/agy/.local/share/keyrings)",
+    "write_file(/home/agy/.local/share/keyrings)",
+    "read_file(/home/agy/.local/state/agy-bridge)",
+    "write_file(/home/agy/.local/state/agy-bridge)"
+  ]
+' "$HOME/.gemini/antigravity-cli/settings.json" >/dev/null || fail 'none policy mismatch'
+if "$helper" apply-ro >/dev/null 2>&1; then
+  fail 'apply-ro after apply-none unexpectedly succeeded'
+fi
+"$helper" restore
+assert_json_eq "$HOME/.gemini/antigravity-cli/settings.json" "$work/none-policy-before.json" 'none policy restore mismatch'
+
+rm -f "$HOME/.gemini/antigravity-cli/settings.json" "$STATE_DIR/workspace-policy-backup.json"
+"$helper" apply-none
+[[ -f "$HOME/.gemini/antigravity-cli/settings.json" ]] || fail 'none policy did not create managed settings from absent state'
+"$helper" restore
+[[ ! -e "$HOME/.gemini/antigravity-cli/settings.json" ]] || fail 'none policy restore did not remove settings that were initially absent'
+[[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail 'none policy backup remained after absent-state restore'
+
 # RW policy must use the same managed settings as RO except for the scoped
 # workspace write grant. This is intentionally separate from run_case so the
 # new action is proven RED before workspace-policy.sh learns apply-rw.

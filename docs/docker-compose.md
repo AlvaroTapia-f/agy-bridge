@@ -289,13 +289,19 @@ Workspace routing is deliberately asymmetric:
 ```text
 auto-ro-* -> explicit /workspace read-only project access
 auto-rw-* -> HTTP 403 before agy is spawned
-ordinary/bare models -> no host workspace capability is implied
+ordinary/bare models -> remain available with explicit workspace access=none
 ```
 
 Workspace `auto-ro-*` runs with the reserved Docker read-only agent, child CWD
 `/workspace`, a bridge-owned workspace contract, a strict child-environment
 allowlist, and a transactional Antigravity read policy. The bridge itself does
 not receive Deno read/write permission for `/workspace`.
+
+Bare models in this deployment do not inherit the mounted project merely
+because it exists in the container. Each bare request uses `access=none`: no
+`/workspace` CWD, the same strict child-environment allowlist, and a
+transactional Antigravity policy that explicitly denies workspace read/write.
+Bare prompts remain ordinary prompts and do not receive the workspace contract.
 
 ### Exact `agy` version gate
 
@@ -348,14 +354,22 @@ default compose.yaml:
 
 compose.workspace.yaml:
   kernel read-only /workspace
+  bare models -> access=none, no /workspace CWD, deny-workspace policy
   auto-ro-* -> read-only workspace agent/policy
   auto-rw-* -> HTTP 403 before agy is spawned
 
 compose.workspace-rw.yaml:
   writable /workspace only
+  bare models -> access=none, no /workspace CWD, deny-workspace policy
   auto-ro-* -> read-only workspace agent/policy
   auto-rw-* -> file-only read-write workspace agent/policy
 ```
+
+The writable bind in the RW deployment does not make ordinary/bare requests
+workspace-aware. Their child environment is sanitized and the per-request
+`access=none` transaction denies `/workspace` read/write before the raw agent is
+spawned. This preserves bare-model availability without exposing the host
+project implicitly.
 
 `auto-ro-*` inside the RW deployment is logically read-only at the managed
 agent and Antigravity policy layers, but the deployment itself still exposes a

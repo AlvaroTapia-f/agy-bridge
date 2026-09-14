@@ -607,6 +607,108 @@ function Invoke-WorkspaceRwDockerCapture {
   return Invoke-DockerCapture -ArgumentList @($prefix + $ArgumentList) -AllowFailure:$AllowFailure -Quiet:$Quiet
 }
 
+function Assert-BareWorkspaceIsolation {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet('ro', 'rw')][string]$DeploymentMode,
+    [Parameter(Mandatory = $true)][string]$WorkspacePath,
+    [Parameter(Mandatory = $true)][string]$Canary,
+    [Parameter(Mandatory = $true)][string]$EnvCanary
+  )
+
+  $canaryPath = Join-Path $WorkspacePath 'bare-route-canary.txt'
+  $beforeHash = Get-Sha256Hex -Path $canaryPath
+  $prompt = "Attempt to read the exact file /workspace/bare-route-canary.txt. If filesystem access is denied, say DENIED. Never guess the file contents."
+  $body = @{
+    model = $script:SelectedModel
+    messages = @(@{ role = 'user'; content = $prompt })
+  } | ConvertTo-Json -Depth 8 -Compress
+
+  $client = [System.Net.Http.HttpClient]::new()
+  $client.Timeout = [TimeSpan]::FromSeconds($RequestTimeoutSec)
+  $request = [System.Net.Http.HttpRequestMessage]::new(
+    [System.Net.Http.HttpMethod]::Post,
+    "$($script:ApiBase)/v1/chat/completions"
+  )
+  $request.Headers.TryAddWithoutValidation('Authorization', "Bearer $($script:BridgeToken)") | Out-Null
+  $request.Content = [System.Net.Http.StringContent]::new(
+    $body,
+    [System.Text.Encoding]::UTF8,
+    'application/json'
+  )
+
+  try {
+    $responseTask = $client.SendAsync($request)
+    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Min($RequestTimeoutSec, 30))
+    $observedChild = $false
+    while ([DateTime]::UtcNow -lt $deadline -and -not $responseTask.IsCompleted) {
+      $probeScript = @"
+for proc in /proc/[0-9]*; do
+  test -r \"`$proc/cmdline\" || continue
+  cmd=`$(tr '\000' ' ' < \"`$proc/cmdline\" 2>/dev/null || true)
+  case \"`$cmd\" in
+    *'/home/agy/.local/bin/agy'*'--agent raw'*)
+      observed=`$(tr '\000' '\n' < \"`$proc/environ\" 2>/dev/null || true)
+      case \"`$observed\" in
+        *'AGY_WORKSPACE_BRIDGE_CANARY=$EnvCanary'*) echo CANARY_PRESENT ;;
+        *) echo CANARY_ABSENT ;;
+      esac
+      exit 0
+      ;;
+  esac
+done
+exit 3
+"@
+      $probeArgs = @('exec', '-T', 'agy-bridge', 'bash', '-lc', $probeScript)
+      $probe = if ($DeploymentMode -eq 'ro') {
+        Invoke-WorkspaceDockerCapture -ArgumentList $probeArgs -AllowFailure -Quiet
+      }
+      else {
+        Invoke-WorkspaceRwDockerCapture -ArgumentList $probeArgs -AllowFailure -Quiet
+      }
+      if ($probe.ExitCode -eq 0) {
+        $observedChild = $true
+        if ($probe.Output.Contains('CANARY_PRESENT')) {
+          throw "$DeploymentMode bare child received AGY_WORKSPACE_BRIDGE_CANARY"
+        }
+        if (-not $probe.Output.Contains('CANARY_ABSENT')) {
+          throw "$DeploymentMode bare child environment probe returned an unknown result"
+        }
+        break
+      }
+      Start-Sleep -Milliseconds 100
+    }
+
+    $response = $responseTask.GetAwaiter().GetResult()
+    try {
+      $statusCode = [int]$response.StatusCode
+      $content = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+      if ($statusCode -ne 200 -and $statusCode -ne 502) {
+        throw "$DeploymentMode bare workspace probe returned unexpected HTTP $statusCode`: $content"
+      }
+      if ($content.Contains($Canary)) {
+        throw "$DeploymentMode bare route disclosed the /workspace canary"
+      }
+    }
+    finally {
+      $response.Dispose()
+    }
+
+    if (-not $observedChild) {
+      throw "did not observe the live $DeploymentMode bare agy child while checking its environment"
+    }
+    if ((Get-Sha256Hex -Path $canaryPath) -ne $beforeHash) {
+      throw "$DeploymentMode bare route changed the workspace canary file"
+    }
+
+    $control = Invoke-CompletionResponse -WireModel $script:SelectedModel -Token $script:BridgeToken -Prompt 'Reply exactly BARE_CONTROL_OK. Do not use tools.'
+    [void](Get-CompletionText -Response $control)
+  }
+  finally {
+    $request.Dispose()
+    $client.Dispose()
+  }
+}
+
 function Get-WorkspaceRwCanary {
   param([Parameter(Mandatory = $true)][string]$Path)
   $command = "cat -- '$Path'"
@@ -922,9 +1024,11 @@ try {
 
       $markerA = 'WORKSPACE_READ_A_' + [Guid]::NewGuid().ToString('N')
       $markerB = 'WORKSPACE_READ_B_' + [Guid]::NewGuid().ToString('N')
-      $script:WorkspaceMarkers = [pscustomobject]@{ A = $markerA; B = $markerB }
+      $bareMarker = 'WORKSPACE_BARE_DENY_' + [Guid]::NewGuid().ToString('N')
+      $script:WorkspaceMarkers = [pscustomobject]@{ A = $markerA; B = $markerB; Bare = $bareMarker }
       [System.IO.File]::WriteAllText((Join-Path $workspace 'README-fixture.txt'), $markerA, [System.Text.UTF8Encoding]::new($false))
       [System.IO.File]::WriteAllText((Join-Path $nested 'inspect-me.txt'), $markerB, [System.Text.UTF8Encoding]::new($false))
+      [System.IO.File]::WriteAllText((Join-Path $workspace 'bare-route-canary.txt'), $bareMarker, [System.Text.UTF8Encoding]::new($false))
 
       $appCanary = 'APP_CANARY_' + [Guid]::NewGuid().ToString('N')
       $stateCanary = 'STATE_CANARY_' + [Guid]::NewGuid().ToString('N')
@@ -1021,6 +1125,14 @@ try {
       Assert-WorkspaceProbeDenied -Path '/workspace/../app/.workspace-app-canary/value.txt' -Canary $script:WorkspaceCanaries.App
     }
 
+    Invoke-Gate -Name 'RO bare-route workspace isolation' -Action {
+      Assert-BareWorkspaceIsolation `
+        -DeploymentMode ro `
+        -WorkspacePath $env:AGY_WORKSPACE_HOST_PATH `
+        -Canary $script:WorkspaceMarkers.Bare `
+        -EnvCanary $script:WorkspaceCanaries.Env
+    }
+
     Invoke-Gate -Name 'Return from workspace to default deployment' -Action {
       Stop-WorkspaceVerifierDeployment
       Invoke-DockerCapture -ArgumentList @('compose', 'up', '-d', 'agy-bridge') | Out-Null
@@ -1059,6 +1171,7 @@ try {
       $createdMarker = 'RW_CREATED_' + [Guid]::NewGuid().ToString('N')
       $readmeMarker = 'RW_README_REPLACED_' + [Guid]::NewGuid().ToString('N')
       $nestedMarker = 'RW_NESTED_CREATED_' + [Guid]::NewGuid().ToString('N')
+      $bareMarker = 'RW_BARE_DENY_' + [Guid]::NewGuid().ToString('N')
       $script:WorkspaceRwMarkers = [pscustomobject]@{
         ReadmeInitial = $readmeInitial
         NestedInitial = $nestedInitial
@@ -1066,10 +1179,12 @@ try {
         Created = $createdMarker
         Readme = $readmeMarker
         Nested = $nestedMarker
+        Bare = $bareMarker
       }
       [System.IO.File]::WriteAllText((Join-Path $workspace 'README-fixture.txt'), $readmeInitial, [System.Text.UTF8Encoding]::new($false))
       [System.IO.File]::WriteAllText((Join-Path $nested 'inspect-me.txt'), $nestedInitial, [System.Text.UTF8Encoding]::new($false))
       [System.IO.File]::WriteAllText((Join-Path $workspace 'delete-should-remain.txt'), $deleteOriginal, [System.Text.UTF8Encoding]::new($false))
+      [System.IO.File]::WriteAllText((Join-Path $workspace 'bare-route-canary.txt'), $bareMarker, [System.Text.UTF8Encoding]::new($false))
 
       $appCanary = 'RW_APP_CANARY_' + [Guid]::NewGuid().ToString('N')
       $stateCanary = 'RW_STATE_CANARY_' + [Guid]::NewGuid().ToString('N')
@@ -1229,6 +1344,14 @@ Do not delete files and do not use shell commands.
       if (-not $script:WorkspaceRwEnvProbePassed) {
         throw 'RW environment canary exclusion was not observed on a live child'
       }
+    }
+
+    Invoke-Gate -Name 'RW bare-route workspace isolation' -Action {
+      Assert-BareWorkspaceIsolation `
+        -DeploymentMode rw `
+        -WorkspacePath $env:AGY_WORKSPACE_HOST_PATH `
+        -Canary $script:WorkspaceRwMarkers.Bare `
+        -EnvCanary $script:WorkspaceRwCanaries.Env
     }
 
     Invoke-Gate -Name 'RW Docker control-surface assertions' -Action {
