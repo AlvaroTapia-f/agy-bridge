@@ -55,9 +55,106 @@ run_case() {
   fi
 }
 
+run_rw_restore_case() {
+  local name="$1" initial="$2"
+  local home="$work/$name/home" state="$work/$name/state"
+  mkdir -p "$home/.gemini/antigravity-cli" "$state"
+  export HOME="$home" STATE_DIR="$state"
+  local settings="$HOME/.gemini/antigravity-cli/settings.json"
+  if [[ "$initial" != '__ABSENT__' ]]; then
+    printf '%s\n' "$initial" > "$settings"
+  fi
+
+  local before="$work/$name-before.json"
+  if [[ -f "$settings" ]]; then cp "$settings" "$before"; else printf '{}\n' > "$before"; fi
+
+  "$helper" apply-rw
+  [[ -f "$STATE_DIR/workspace-policy-backup.json" ]] || fail "$name: backup missing"
+  jq -e '
+    .permissions.allow == ["read_file(/workspace)", "write_file(/workspace)"]
+  ' "$settings" >/dev/null || fail "$name: RW allow list mismatch"
+
+  if "$helper" apply-ro >/dev/null 2>&1; then
+    fail "$name: apply-ro after apply-rw unexpectedly succeeded"
+  fi
+
+  "$helper" restore
+  [[ ! -e "$STATE_DIR/workspace-policy-backup.json" ]] || fail "$name: backup not removed after restore"
+  if [[ "$initial" == '__ABSENT__' ]]; then
+    if [[ -f "$settings" ]]; then
+      jq -e 'keys | length == 0' "$settings" >/dev/null || fail "$name: absent settings restored with content"
+    fi
+  else
+    assert_json_eq "$settings" "$before" "$name: settings not restored exactly"
+  fi
+}
+
 run_case absent '__ABSENT__'
 run_case present '{"allowNonWorkspaceAccess":true,"trustedWorkspaces":["/old"],"toolPermission":"permissive","permissions":{"allow":["legacy"]},"unrelated":{"keep":1}}'
 run_case mixed '{"trustedWorkspaces":["/elsewhere"],"permissions":{"deny":["legacy-deny"]},"unrelated":"keep"}'
+
+# RW policy must use the same managed settings as RO except for the scoped
+# workspace write grant. This is intentionally separate from run_case so the
+# new action is proven RED before workspace-policy.sh learns apply-rw.
+export HOME="$work/rw-policy/home" STATE_DIR="$work/rw-policy/state"
+mkdir -p "$HOME/.gemini/antigravity-cli" "$STATE_DIR"
+printf '%s\n' '{"unrelated":{"keep":1}}' > "$HOME/.gemini/antigravity-cli/settings.json"
+"$helper" apply-rw
+jq -e '
+  .unrelated == {"keep":1} and
+  .allowNonWorkspaceAccess == false and
+  .trustedWorkspaces == ["/workspace"] and
+  .toolPermission == "request-review" and
+  .permissions.allow == ["read_file(/workspace)", "write_file(/workspace)"] and
+  .permissions.deny == [
+    "read_file(/app)",
+    "write_file(/app)",
+    "read_file(/home/agy/.gemini)",
+    "write_file(/home/agy/.gemini)",
+    "read_file(/home/agy/.local/share/agy-secrets)",
+    "write_file(/home/agy/.local/share/agy-secrets)",
+    "read_file(/home/agy/.local/share/keyrings)",
+    "write_file(/home/agy/.local/share/keyrings)",
+    "read_file(/home/agy/.local/state/agy-bridge)",
+    "write_file(/home/agy/.local/state/agy-bridge)"
+  ] and
+  ([.permissions.allow[], .permissions.deny[]] | all(contains("*") | not)) and
+  ([.permissions.allow[], .permissions.deny[]] | all(startswith("command(") | not))
+' "$HOME/.gemini/antigravity-cli/settings.json" >/dev/null || fail 'RW policy mismatch'
+"$helper" restore
+
+run_rw_restore_case rw-absent '__ABSENT__'
+run_rw_restore_case rw-present '{"allowNonWorkspaceAccess":true,"trustedWorkspaces":["/old"],"toolPermission":"permissive","permissions":{"allow":["legacy"],"deny":["legacy-deny"]},"unrelated":{"keep":7}}'
+
+# The nested-transaction guard is shared in both directions.
+export HOME="$work/ro-then-rw/home" STATE_DIR="$work/ro-then-rw/state"
+mkdir -p "$HOME/.gemini/antigravity-cli" "$STATE_DIR"
+printf '%s\n' '{"unrelated":"keep"}' > "$HOME/.gemini/antigravity-cli/settings.json"
+"$helper" apply-ro
+if "$helper" apply-rw >/dev/null 2>&1; then
+  fail 'apply-rw after apply-ro unexpectedly succeeded'
+fi
+"$helper" restore
+
+# A stale RW transaction is restored through the same startup recovery action.
+export HOME="$work/stale-rw/home" STATE_DIR="$work/stale-rw/state"
+mkdir -p "$HOME/.gemini/antigravity-cli" "$STATE_DIR"
+printf '%s\n' '{"unrelated":84,"toolPermission":"old"}' > "$HOME/.gemini/antigravity-cli/settings.json"
+cp "$HOME/.gemini/antigravity-cli/settings.json" "$work/stale-rw-before.json"
+"$helper" apply-rw
+"$helper" restore-if-needed
+assert_json_eq "$HOME/.gemini/antigravity-cli/settings.json" "$work/stale-rw-before.json" 'stale RW recovery mismatch'
+
+# Corrupting an RW transaction backup must fail closed and retain evidence.
+export HOME="$work/corrupt-rw/home" STATE_DIR="$work/corrupt-rw/state"
+mkdir -p "$HOME/.gemini/antigravity-cli" "$STATE_DIR"
+printf '%s\n' '{"unrelated":"keep"}' > "$HOME/.gemini/antigravity-cli/settings.json"
+"$helper" apply-rw
+printf '%s\n' '{broken' > "$STATE_DIR/workspace-policy-backup.json"
+if "$helper" restore-if-needed >/dev/null 2>&1; then
+  fail 'corrupt RW backup unexpectedly restored'
+fi
+[[ -f "$STATE_DIR/workspace-policy-backup.json" ]] || fail 'corrupt RW backup should remain'
 
 # Stale-backup recovery: apply, then a new invocation restores it.
 export HOME="$work/stale/home" STATE_DIR="$work/stale/state"

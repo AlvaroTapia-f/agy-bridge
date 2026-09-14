@@ -35,7 +35,20 @@ atomic_json_write() {
   trap - RETURN
 }
 
-apply_ro() {
+apply_policy() {
+  local mode="$1" allow
+  case "$mode" in
+    ro)
+      allow='["read_file(/workspace)"]'
+      ;;
+    rw)
+      allow='["read_file(/workspace)","write_file(/workspace)"]'
+      ;;
+    *)
+      fail "unsupported workspace policy mode: $mode"
+      ;;
+  esac
+
   [[ ! -e "$backup_file" ]] || fail "backup already exists; refusing nested policy transaction"
   mkdir -p "$settings_dir" "$backup_dir"
 
@@ -60,12 +73,12 @@ apply_ro() {
     ')"
   atomic_json_write "$backup_file" "$backup"
 
-  updated="$(jq '
+  updated="$(jq --argjson allow "$allow" '
     .allowNonWorkspaceAccess = false
     | .trustedWorkspaces = ["/workspace"]
     | .toolPermission = "request-review"
     | .permissions = {
-        allow: ["read_file(/workspace)"],
+        allow: $allow,
         deny: [
           "read_file(/app)",
           "write_file(/app)",
@@ -121,7 +134,10 @@ restore_policy() {
 
 case "$action" in
   apply-ro)
-    apply_ro
+    apply_policy ro
+    ;;
+  apply-rw)
+    apply_policy rw
     ;;
   restore)
     restore_policy
@@ -130,6 +146,6 @@ case "$action" in
     if [[ -e "$backup_file" ]]; then restore_policy; fi
     ;;
   *)
-    fail "usage: $0 {apply-ro|restore|restore-if-needed}"
+    fail "usage: $0 {apply-ro|apply-rw|restore|restore-if-needed}"
     ;;
 esac
