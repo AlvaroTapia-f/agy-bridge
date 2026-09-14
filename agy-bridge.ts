@@ -34,20 +34,12 @@ function parseDurationMs(s: string): number {
   const m = /^(\d+)\s*(ms|s|m|h)?$/.exec(s.trim());
   if (!m) return 15 * 60_000;
   const n = Number(m[1]);
-  const mult = m[2] === "ms"
-    ? 1
-    : m[2] === "s"
-    ? 1_000
-    : m[2] === "h"
-    ? 3_600_000
-    : 60_000;
+  const mult = m[2] === "ms" ? 1 : m[2] === "s" ? 1_000 : m[2] === "h" ? 3_600_000 : 60_000;
   return n * mult;
 }
 const HARD_MARGIN_MS = Number(Deno.env.get("AGY_HARD_MARGIN_MS") ?? 60_000);
 const AGY_HARD_DEADLINE_MS = parseDurationMs(PRINT_TIMEOUT) +
-  (Number.isFinite(HARD_MARGIN_MS) && HARD_MARGIN_MS >= 0
-    ? HARD_MARGIN_MS
-    : 60_000);
+  (Number.isFinite(HARD_MARGIN_MS) && HARD_MARGIN_MS >= 0 ? HARD_MARGIN_MS : 60_000);
 const TOOLS_ENABLED = (Deno.env.get("AGY_TOOLS") ?? "on") !== "off";
 // "slim" strips per-property descriptions from tool JSON schemas (big token
 // savings when opencode sends many tools); "full" keeps them verbatim
@@ -154,11 +146,7 @@ async function* readLines(stream: ReadableStream<Uint8Array>) {
 
 // Deno refuses scoped --allow-run spawns when dynamic-loader env vars would be
 // inherited; strip them (keeps manual and systemd launches identical).
-const CHILD_ENV_BLOCKLIST = new Set([
-  "LD_LIBRARY_PATH",
-  "LD_PRELOAD",
-  "LD_AUDIT",
-]);
+const CHILD_ENV_BLOCKLIST = new Set(["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT"]);
 function childEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(Deno.env.toObject())) {
@@ -287,12 +275,7 @@ interface OAIChatRequest {
 }
 
 interface AIMessage {
-  role:
-    | "system"
-    | "user"
-    | "assistant"
-    | "tool"
-    | (string & Record<PropertyKey, never>);
+  role: "system" | "user" | "assistant" | "tool" | (string & Record<PropertyKey, never>);
   content?: string | Array<{ type?: string; text?: string }> | null;
   tool_calls?: Array<{
     id?: string;
@@ -350,9 +333,7 @@ function renderTools(tools: NonNullable<OAIChatRequest["tools"]>): string {
     .map((t) => {
       const f = t.function!;
       let parameters: unknown = f.parameters ?? { type: "object" };
-      if (TOOL_SCHEMA === "slim") {
-        parameters = stripSchemaDescriptions(parameters);
-      }
+      if (TOOL_SCHEMA === "slim") parameters = stripSchemaDescriptions(parameters);
       const params = JSON.stringify(parameters);
       const desc = f.description ?? "";
       return `<tool name="${f.name}">\n  description: ${desc}\n  parameters: ${params}\n</tool>`;
@@ -381,9 +362,7 @@ function renderBlocks(msgs: AIMessage[]): string[] {
       case "assistant": {
         const calls = (m.tool_calls ?? [])
           .map((c) =>
-            `<tool_call>{"name":${
-              JSON.stringify(c.function?.name ?? "")
-            },"arguments":${
+            `<tool_call>{"name":${JSON.stringify(c.function?.name ?? "")},"arguments":${
               safeParse(c.function?.arguments ?? "{}")
             }}</tool_call>`
           )
@@ -428,9 +407,7 @@ function renderPrompt(req: OAIChatRequest): RenderedPrompt {
       if (text) system.push(text);
     }
   }
-  const transcript = renderBlocks(
-    (req.messages ?? []).filter((m) => m.role !== "system"),
-  );
+  const transcript = renderBlocks((req.messages ?? []).filter((m) => m.role !== "system"));
 
   const head = system.length
     ? "# System instructions\n\n" + system.join("\n\n") + "\n\n"
@@ -443,8 +420,7 @@ ${REPLY_TAIL(useTools)}`;
   return {
     prompt,
     toolsChars,
-    systemChars:
-      system.filter((_, i) => i > 0 || !useTools).join("\n\n").length,
+    systemChars: system.filter((_, i) => i > 0 || !useTools).join("\n\n").length,
     historyChars: transcript.join("\n\n").length,
   };
 }
@@ -486,8 +462,7 @@ function renderAutonomousPrompt(
     : "";
   const history = transcript.join("\n\n");
   return {
-    prompt:
-      `${head}# Conversation transcript\n\n${history}\n${AUTONOMOUS_TAIL}`,
+    prompt: `${head}# Conversation transcript\n\n${history}\n${AUTONOMOUS_TAIL}`,
     toolsChars: 0,
     systemChars: head.length,
     historyChars: history.length,
@@ -498,8 +473,7 @@ function renderAutonomousPrompt(
 
 async function sha(s: string): Promise<string> {
   const d = await crypto.subtle.digest("SHA-256", enc.encode(s));
-  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function canonicalMsg(m: AIMessage): string {
@@ -563,9 +537,7 @@ async function preparePrompt(
   const msgs = req.messages!;
   const ctxHash = await sha(
     JSON.stringify({
-      system: msgs.filter((m) => m.role === "system").map((m) =>
-        textContent(m)
-      ),
+      system: msgs.filter((m) => m.role === "system").map((m) => textContent(m)),
       tools: req.tools ?? null,
       agent: AGY_AGENT,
     }),
@@ -591,10 +563,7 @@ async function preparePrompt(
   const useTools = TOOLS_ENABLED && (req.tools?.length ?? 0) > 0;
   if (entry) {
     entry.lastUsed = Date.now();
-    const contPrompt = renderContinuation(
-      msgs.slice(entry.msgHashes.length),
-      useTools,
-    );
+    const contPrompt = renderContinuation(msgs.slice(entry.msgHashes.length), useTools);
     return {
       ...full,
       prompt: contPrompt,
@@ -707,9 +676,7 @@ interface AgyExecutionContext {
   workspaceReadOnly?: boolean;
 }
 
-async function runWorkspacePolicy(
-  action: "apply-ro" | "restore",
-): Promise<void> {
+async function runWorkspacePolicy(action: "apply-ro" | "restore"): Promise<void> {
   const child = new Deno.Command(WORKSPACE_POLICY_HELPER, {
     args: [action],
     stdout: "piped",
@@ -1026,9 +993,7 @@ async function runAgy(
 // required"). The finished report still lives in the session transcript.
 // Recover the LAST substantive planner response so the orchestrator gets the
 // deliverable instead of a bare error.
-async function salvageFinalResponse(
-  conversationId: string,
-): Promise<string | null> {
+async function salvageFinalResponse(conversationId: string): Promise<string | null> {
   const base =
     `${Deno.env.get("HOME")}/.gemini/antigravity-cli/brain/${conversationId}` +
     "/.system_generated/logs";
@@ -1057,8 +1022,7 @@ async function salvageFinalResponse(
   return null;
 }
 
-const genId = () =>
-  `agy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const genId = () => `agy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 function oaiUsage(u?: Record<string, number>) {
   const p = u?.input_tokens ?? 0;
@@ -1072,9 +1036,7 @@ function oaiUsage(u?: Record<string, number>) {
 
 function jsonError(status: number, message: string) {
   return new Response(
-    JSON.stringify({
-      error: { message, type: "agy_bridge_error", code: status },
-    }),
+    JSON.stringify({ error: { message, type: "agy_bridge_error", code: status } }),
     { status, headers: { "content-type": "application/json" } },
   );
 }
@@ -1100,11 +1062,7 @@ async function handleAutonomousChat(
     autonomous: auto.profile,
     agent: selectedAgent,
     ...(workspaceReadOnly
-      ? {
-        workspace_enabled: true,
-        workspace_mode: "ro",
-        workspace_root: "/workspace",
-      }
+      ? { workspace_enabled: true, workspace_mode: "ro", workspace_root: "/workspace" }
       : {}),
     msgs: body.messages?.length ?? 0,
     prompt_chars: prepared.prompt.length,
@@ -1160,12 +1118,8 @@ async function handleAutonomousChat(
           closed = true;
         }
       };
-      const send = (obj: unknown) =>
-        sendRaw(`data: ${JSON.stringify(obj)}\n\n`);
-      const chunk = (
-        delta: Record<string, unknown>,
-        finish: string | null = null,
-      ) =>
+      const send = (obj: unknown) => sendRaw(`data: ${JSON.stringify(obj)}\n\n`);
+      const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
         send({
           id,
           object: "chat.completion.chunk",
@@ -1174,10 +1128,7 @@ async function handleAutonomousChat(
           choices: [{ index: 0, delta, finish_reason: finish }],
         });
 
-      const ka = setInterval(
-        () => sendRaw(`: keepalive ${Date.now()}\n\n`),
-        10_000,
-      );
+      const ka = setInterval(() => sendRaw(`: keepalive ${Date.now()}\n\n`), 10_000);
       try {
         chunk({ role: "assistant" });
         const streamingPrompt = prepared.prompt + NARRATION_SUFFIX;
@@ -1185,31 +1136,16 @@ async function handleAutonomousChat(
           chunk: (d) => chunk(d),
           log,
         });
-        const r = await runAgy(
-          auto.real,
-          streamingPrompt,
-          {
-            onDelta: (kind, d) => classifier.onDelta(kind, d),
-            log,
-          },
-          req.signal,
-          undefined,
-          selectedAgent,
-          execution,
-        );
+        const r = await runAgy(auto.real, streamingPrompt, {
+          onDelta: (kind, d) => classifier.onDelta(kind, d),
+          log,
+        }, req.signal, undefined, selectedAgent, execution);
         classifier.flush();
         if (!r.ok) {
           send({ error: { message: r.error ?? "agy failed", code: 502 } });
         } else {
           chunk({}, "stop");
-          send({
-            id,
-            object: "chat.completion.chunk",
-            created,
-            model: modelStr,
-            choices: [],
-            usage: oaiUsage(r.usage),
-          });
+          send({ id, object: "chat.completion.chunk", created, model: modelStr, choices: [], usage: oaiUsage(r.usage) });
         }
       } catch (e) {
         console.error("autonomous stream error:", e);
@@ -1376,12 +1312,8 @@ async function handleChat(req: Request): Promise<Response> {
           closed = true;
         }
       };
-      const send = (obj: unknown) =>
-        sendRaw(`data: ${JSON.stringify(obj)}\n\n`);
-      const chunk = (
-        delta: Record<string, unknown>,
-        finish: string | null = null,
-      ) =>
+      const send = (obj: unknown) => sendRaw(`data: ${JSON.stringify(obj)}\n\n`);
+      const chunk = (delta: Record<string, unknown>, finish: string | null = null) =>
         send({
           id,
           object: "chat.completion.chunk",
@@ -1390,10 +1322,7 @@ async function handleChat(req: Request): Promise<Response> {
           choices: [{ index: 0, delta, finish_reason: finish }],
         });
 
-      const ka = setInterval(
-        () => sendRaw(`: keepalive ${Date.now()}\n\n`),
-        10_000,
-      );
+      const ka = setInterval(() => sendRaw(`: keepalive ${Date.now()}\n\n`), 10_000);
       try {
         chunk({ role: "assistant" });
         if (useTools) {
@@ -1420,24 +1349,10 @@ async function handleChat(req: Request): Promise<Response> {
             const { tool_calls } = parseToolCalls(r.text);
             if (tool_calls.length) {
               chunk({ role: "assistant", tool_calls }, "tool_calls");
-              send({
-                id,
-                object: "chat.completion.chunk",
-                created,
-                model,
-                choices: [],
-                usage: oaiUsage(r.usage),
-              });
+              send({ id, object: "chat.completion.chunk", created, model, choices: [], usage: oaiUsage(r.usage) });
             } else {
               chunk({}, "stop");
-              send({
-                id,
-                object: "chat.completion.chunk",
-                created,
-                model,
-                choices: [],
-                usage: oaiUsage(r.usage),
-              });
+              send({ id, object: "chat.completion.chunk", created, model, choices: [], usage: oaiUsage(r.usage) });
             }
           }
         } else {
@@ -1445,31 +1360,18 @@ async function handleChat(req: Request): Promise<Response> {
             chunk: (d) => chunk(d),
             log,
           });
-          const r = await runAgy(
-            model,
-            prompt,
-            {
-              onDelta: (kind, d) => classifier.onDelta(kind, d),
-              log,
-              commit: prepared.commit,
-              evict: prepared.evict,
-            },
-            req.signal,
-            prepared.conversationId,
-          );
+          const r = await runAgy(model, prompt, {
+            onDelta: (kind, d) => classifier.onDelta(kind, d),
+            log,
+            commit: prepared.commit,
+            evict: prepared.evict,
+          }, req.signal, prepared.conversationId);
           classifier.flush();
           if (!r.ok) {
             send({ error: { message: r.error ?? "agy failed", code: 502 } });
           } else {
             chunk({}, "stop");
-            send({
-              id,
-              object: "chat.completion.chunk",
-              created,
-              model,
-              choices: [],
-              usage: oaiUsage(r.usage),
-            });
+            send({ id, object: "chat.completion.chunk", created, model, choices: [], usage: oaiUsage(r.usage) });
           }
         }
       } catch (e) {
@@ -1498,33 +1400,22 @@ async function handleChat(req: Request): Promise<Response> {
 
 Deno.serve({ port: PORT, hostname: HOSTNAME }, async (req) => {
   const url = new URL(req.url);
-  if (
-    req.method === "GET" &&
-    (url.pathname === "/healthz" || url.pathname === "/v1/healthz")
-  ) {
+  if (req.method === "GET" && (url.pathname === "/healthz" || url.pathname === "/v1/healthz")) {
     // Open on purpose (liveness probe), but minimal: no catalog details.
     return Response.json({ ok: true });
   }
   const denied = accessGuard(req);
   if (denied) return denied;
-  if (
-    req.method === "GET" &&
-    (url.pathname === "/v1/models" || url.pathname === "/models")
-  ) {
+  if (req.method === "GET" && (url.pathname === "/v1/models" || url.pathname === "/models")) {
     await refreshModels();
     return Response.json({
       object: "list",
-      data: modelSlugs.map((m) => ({
-        id: m,
-        object: "model",
-        owned_by: "antigravity",
-      })),
+      data: modelSlugs.map((m) => ({ id: m, object: "model", owned_by: "antigravity" })),
     });
   }
   if (
     req.method === "POST" &&
-    (url.pathname === "/v1/chat/completions" ||
-      url.pathname === "/chat/completions")
+    (url.pathname === "/v1/chat/completions" || url.pathname === "/chat/completions")
   ) {
     return handleChat(req);
   }
@@ -1534,13 +1425,9 @@ Deno.serve({ port: PORT, hostname: HOSTNAME }, async (req) => {
 console.log(
   `agy-bridge listening on http://${HOSTNAME}:${PORT} (agent=${AGY_AGENT}, tools=${
     TOOLS_ENABLED ? "on" : "off"
-  }, max_concurrent=${MAX_CONCURRENT}${
-    AGY_TOKEN ? ", auth=on" : ", auth=OFF"
-  })`,
+  }, max_concurrent=${MAX_CONCURRENT}${AGY_TOKEN ? ", auth=on" : ", auth=OFF"})`,
 );
 if (!AGY_TOKEN) {
-  console.error(
-    "AGY_TOKEN not set: bearer auth is DISABLED (loopback binding only)",
-  );
+  console.error("AGY_TOKEN not set: bearer auth is DISABLED (loopback binding only)");
 }
 await refreshModels();
