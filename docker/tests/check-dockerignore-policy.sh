@@ -22,6 +22,7 @@ expected_allowlist=(
   '!.env.example'
   '!Dockerfile'
   '!compose.yaml'
+  '!compose.workspace.yaml'
   '!deno.json'
   '!deno.lock'
   '!agy-bridge.ts'
@@ -41,6 +42,11 @@ expected_allowlist=(
   '!docker/keyring-session.sh'
   '!docker/print-token.sh'
   '!docker/start-bridge.sh'
+  '!agents/agy-bridge-worker-ro-v1/'
+  '!agents/agy-bridge-worker-ro-v1/agent.md'
+  '!docker/workspace-policy.sh'
+  '!docker/workspace/'
+  '!docker/workspace/verified-agy-versions.txt'
 )
 
 mapfile -t actual_allowlist < <(grep '^!' "$file")
@@ -56,7 +62,7 @@ for i in "${!expected_allowlist[@]}"; do
   fi
 done
 
-for pattern in 'agents/**' 'agents/raw/**' 'agents/worker-ro/**' 'agents/worker-rw/**' 'plugins/**' 'docker/**'; do
+for pattern in 'agents/**' 'agents/raw/**' 'agents/worker-ro/**' 'agents/worker-rw/**' 'plugins/**' 'docker/**' 'agents/agy-bridge-worker-ro-v1/**' 'docker/workspace/**'; do
   grep -Fx -- "$pattern" "$file" >/dev/null || {
     echo "dockerignore must re-close allowlisted parent subtree: $pattern" >&2
     exit 1

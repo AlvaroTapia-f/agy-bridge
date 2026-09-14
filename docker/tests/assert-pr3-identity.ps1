@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$expectedBaseRef = 'bcf2f2532be7d32a78167d745a700f8a480114e0'
+$expectedBaseRef = 'f5ae309fd1cfe11653753d9b62eb7da19abac767'
 
 function Invoke-GitCapture {
   param(
@@ -62,7 +62,7 @@ try {
   }
 
   if (-not $BaseRef) {
-    throw 'Base ref is required. Pass -BaseRef explicitly to the frozen PR2 runtime commit.'
+    throw 'Base ref is required. Pass -BaseRef explicitly to the frozen main runtime commit.'
   }
   if ($BaseRef -cne $expectedBaseRef) {
     throw "Base ref mismatch: expected $expectedBaseRef, got $BaseRef"
@@ -75,7 +75,7 @@ try {
     'merge-base', '--is-ancestor', $BaseRef, 'HEAD'
   ) -AllowFailure -Quiet
   if ($ancestor.ExitCode -ne 0) {
-    throw "Frozen PR2 base $BaseRef is not an ancestor of HEAD $head"
+    throw "Frozen main base $BaseRef is not an ancestor of HEAD $head"
   }
 
   # git diff --name-only
@@ -84,6 +84,18 @@ try {
   ) -Quiet).Output
   $changedPaths = @($changedOutput -split '[\r\n]+' | Where-Object { $_ })
   $disallowedPaths = @($changedPaths | Where-Object {
+    $_ -ne '.dockerignore' -and
+    $_ -ne 'Dockerfile' -and
+    $_ -ne 'agy-bridge.ts' -and
+    $_ -ne 'compose.workspace.yaml' -and
+    $_ -ne 'agents/agy-bridge-worker-ro-v1/agent.md' -and
+    $_ -ne 'docker/start-bridge.sh' -and
+    $_ -ne 'docker/workspace-policy.sh' -and
+    $_ -ne 'docker/workspace/verified-agy-versions.txt' -and
+    $_ -ne 'tests/service.test.ts' -and
+    $_ -ne 'docs/superpowers/plans/2026-09-12-explicit-host-workspace-ro.md' -and
+    $_ -ne 'docs/superpowers/plans/2026-09-12-read-write-host-workspace-pr4.md' -and
+    $_ -ne 'docs/superpowers/specs/2026-09-12-explicit-host-workspace-ro-design.md' -and
     $_ -ne 'docs/docker-compose.md' -and
     $_ -ne '.github/workflows/linux-docker-deterministic.yml' -and
     $_ -notmatch '^docker/tests/'

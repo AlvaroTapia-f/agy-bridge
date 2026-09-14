@@ -4,6 +4,7 @@ file="${1:-/app/docker/tests/verify-all.ps1}"
 identity_file="${2:-/app/docker/tests/assert-pr3-identity.ps1}"
 identity_test="${3:-/app/docker/tests/test-verifier-identity.ps1}"
 docs_file="${4:-/app/docs/docker-compose.md}"
+suite_file="${5:-/app/docker/tests/run.sh}"
 
 [[ -f "$file" ]] || {
   echo "missing full verifier: $file" >&2
@@ -25,6 +26,11 @@ docs_file="${4:-/app/docs/docker-compose.md}"
   exit 1
 }
 
+[[ -f "$suite_file" ]] || {
+  echo "missing deterministic Docker suite: $suite_file" >&2
+  exit 1
+}
+
 required=(
   '[string]$ExpectedHead'
   '[string]$Model'
@@ -34,6 +40,21 @@ required=(
   'assert-pr3-identity.ps1'
   'test-build-context.ps1'
   'test-compose.ps1'
+  'test-compose-workspace.ps1'
+  'compose.workspace.yaml'
+  'AGY_WORKSPACE_HOST_PATH'
+  'verified-agy-versions.txt'
+  'Workspace exact agy version gate and fixture setup'
+  'Workspace read access'
+  'Workspace host immutability'
+  'Workspace auto-rw denial'
+  'Workspace non-workspace canary denial'
+  '/app/.workspace-app-canary/value.txt'
+  '/workspace/../app/.workspace-app-canary/value.txt'
+  'Get-WorkspaceFingerprint'
+  'Get-Sha256Hex'
+  'System.Security.Cryptography.SHA256'
+  'auto-rw must return HTTP 403'
   'docker compose config'
   '--profile test build test'
   'dockerTestsMount'
@@ -84,7 +105,7 @@ done
 identity_required=(
   '[string]$ExpectedHead'
   '[string]$BaseRef'
-  'bcf2f2532be7d32a78167d745a700f8a480114e0'
+  'f5ae309fd1cfe11653753d9b62eb7da19abac767'
   'git rev-parse HEAD'
   '--untracked-files=all'
   'Base ref mismatch'
@@ -119,8 +140,8 @@ for needle in "${identity_regression_required[@]}"; do
   }
 done
 
-grep -F -- 'bcf2f2532be7d32a78167d745a700f8a480114e0' "$docs_file" >/dev/null || {
-  echo 'Docker deployment guide must pin the final frozen PR2 SHA' >&2
+grep -F -- 'f5ae309fd1cfe11653753d9b62eb7da19abac767' "$docs_file" >/dev/null || {
+  echo 'Docker deployment guide must pin the final frozen main SHA' >&2
   exit 1
 }
 
@@ -153,7 +174,7 @@ if grep -E '^[[:space:]]*&?[[:space:]]*deno[[:space:]]+(lint|task test)' "$file"
 fi
 
 if grep -E 'upstream/main|origin/main' "$file" >/dev/null; then
-  echo 'full verifier must require an explicit frozen PR2 -BaseRef instead of guessing main' >&2
+  echo 'full verifier must require an explicit frozen main -BaseRef instead of guessing main' >&2
   exit 1
 fi
 
@@ -161,5 +182,10 @@ if grep -F -- '...HEAD' "$identity_file" >/dev/null; then
   echo 'full verifier must prove ancestry before diffing PR2 -> PR3; triple-dot alone is not an identity gate' >&2
   exit 1
 fi
+
+grep -F -- 'check-workspace-security-patterns.sh' "$suite_file" >/dev/null || {
+  echo 'deterministic Docker suite must invoke check-workspace-security-patterns.sh' >&2
+  exit 1
+}
 
 echo 'PASS: full verifier retains required Docker runtime merge gates'

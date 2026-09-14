@@ -4,6 +4,7 @@
 !.env.example
 !Dockerfile
 !compose.yaml
+!compose.workspace.yaml
 !deno.json
 !deno.lock
 !agy-bridge.ts
@@ -32,3 +33,11 @@ docker/**
 !docker/keyring-session.sh
 !docker/print-token.sh
 !docker/start-bridge.sh
+
+!agents/agy-bridge-worker-ro-v1/
+agents/agy-bridge-worker-ro-v1/**
+!agents/agy-bridge-worker-ro-v1/agent.md
+!docker/workspace-policy.sh
+!docker/workspace/
+docker/workspace/**
+!docker/workspace/verified-agy-versions.txt
