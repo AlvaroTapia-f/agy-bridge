@@ -31,3 +31,9 @@ Thumbs.db
 
 # Coverage
 coverage/
+
+# Local ODD tracking (process notes, Engram mirror is source of truth)
+odd/
+
+# Local issue template drafts (commit separately when ready)
+.github/ISSUE_TEMPLATE/
