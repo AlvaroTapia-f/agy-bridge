@@ -75,7 +75,7 @@ Si no utilizas systemd o prefieres configurar todo a mano, replica lo que hace `
    ```
 
 4. **Registrar provider y modelos en `~/.config/opencode/opencode.json` (global):**
-   Replica lo que hace `install.sh` (ver `plugins/agy-bridge.ts`): añade `provider.agy-bridge` (`npm: "@ai-sdk/openai-compatible"`, `options.baseURL: "http://127.0.0.1:7421/v1"`) y `plugin` con la ruta del plugin. Los modelos `auto-ro/rw-*` se generan agrupando el catálogo de `GET /v1/models` por sufijo de esfuerzo; no exponer ids bare `gemini-*`/`claude-*`.
+   Replica lo que hace `install.sh` (ver `plugins/agy-bridge.ts`): añade `provider.agy-bridge` (`npm: "@ai-sdk/openai-compatible"`, `options.baseURL: "http://127.0.0.1:7421/v1"`) y `plugin` con la ruta del plugin. Los modelos `auto-ro/rw-*` se generan agrupando el catálogo de `GET /v1/models` por sufijo de esfuerzo; no exponer ids bare `gemini-*`/`claude-*`. Los modelos los escribe `deno task sync:models`.
 
 5. **Configurar auth (elige una):**
    - **Automática (como `--with-auth`):** lee `AGY_TOKEN` de `~/.config/agy-bridge/env` y hace upsert en `~/.local/share/opencode/auth.json` preservando otras keys, `chmod 600`.
@@ -112,12 +112,30 @@ El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.j
     "agy-bridge": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "AGY Bridge",
-      "options": { "baseURL": "http://127.0.0.1:7421/v1" }
+      "options": { "baseURL": "http://127.0.0.1:7421/v1" },
+      "models": {
+        "auto-ro-gemini-3.1-pro": {
+          "id": "auto-ro-gemini-3.1-pro",
+          "name": "auto-ro-gemini-3.1-pro",
+          "provider": { "id": "agy-bridge", "name": "AGY Bridge" },
+          "reasoning": true,
+          "interleaved": { "field": "reasoning_content" },
+          "reasoning_options": ["high", "low"],
+          "variants": {
+            "high": { "reasoningEffort": "high" },
+            "low": { "reasoningEffort": "low" },
+            "medium": { "disabled": true }
+          }
+        }
+        // ... resto de los 14 modelos generados por sync
+      }
     }
   },
   "plugin": ["file:///home/<user>/.config/opencode/plugins/agy-bridge.ts"]
 }
 ```
+
+El plugin solo resuelve live; sin `models` en JSON no hay efforts.
 
 - `baseURL` **debe** terminar en `/v1` — el SDK añade `/chat/completions` (sin `/v1` obtienes `404`).
 - `Host` guard en el bridge: solo `127.0.0.1:*` o `localhost:*` → `Host: evil.com` devuelve `403`.

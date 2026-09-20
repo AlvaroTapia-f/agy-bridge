@@ -144,12 +144,30 @@ plugin ([forma exacta](docs/installer-internals.md#provider-opencode-global)):
     "agy-bridge": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "AGY Bridge",
-      "options": { "baseURL": "http://127.0.0.1:7421/v1" }
+      "options": { "baseURL": "http://127.0.0.1:7421/v1" },
+      "models": {
+        "auto-ro-gemini-3.1-pro": {
+          "id": "auto-ro-gemini-3.1-pro",
+          "name": "auto-ro-gemini-3.1-pro",
+          "provider": { "id": "agy-bridge", "name": "AGY Bridge" },
+          "reasoning": true,
+          "interleaved": { "field": "reasoning_content" },
+          "reasoning_options": ["high", "low"],
+          "variants": {
+            "high": { "reasoningEffort": "high" },
+            "low": { "reasoningEffort": "low" },
+            "medium": { "disabled": true }
+          }
+        }
+        // ... resto de los 14 modelos generados por sync
+      }
     }
   },
   "plugin": ["file:///C:/Users/<tu-usuario>/.config/opencode/plugins/agy-bridge.ts"]
 }
 ```
+
+El plugin solo resuelve live; sin `models` en JSON no hay efforts.
 
 Los modelos `auto-ro/rw-*` con `variants` (`reasoningEffort`) se generan con
 `deno task sync:models` en Linux; en Windows, si el catálogo cambia, regenerá
