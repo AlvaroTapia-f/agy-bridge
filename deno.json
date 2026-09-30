@@ -2,6 +2,7 @@
   "imports": {
     "@opencode-ai/plugin": "./stubs/opencode-plugin.ts",
     "@opencode-ai/sdk/v2": "./stubs/opencode-sdk-v2.ts",
+    "@opencode/plugin": "./stubs/opencode-plugin-v2.ts",
     "@std/assert": "jsr:@std/assert@^1.0.19"
   },
   "tasks": {
