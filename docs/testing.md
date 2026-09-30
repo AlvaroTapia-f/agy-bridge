@@ -24,6 +24,26 @@ Smoke test manual post-instalación (puente vivo, variante → wire id):
 ver [Verificación](installer-internals.md#verificación), paso 5
 (`POST auto-ro-*`).
 
+## Smoke tests de plugin (V1 y V2)
+
+```sh
+bash tests/plugin-smoke.sh      # plugin V1 contra el binario opencode real
+bash tests/plugin-smoke-v2.sh   # bundle V2 contra el binario opencode real
+```
+
+Los dos corren contra el `opencode` instalado en la máquina y **nunca tocan
+`~/.config/opencode`**: cada uno arma su sandbox en `mktemp -d`. El de V2 aísla
+además data y state con `XDG_CONFIG_HOME` / `XDG_DATA_HOME` /
+`XDG_STATE_HOME`, y levanta su propio `opencode serve` privado en un puerto
+libre, porque en modo servicio el comando habla con el proceso de fondo que ya
+cargó sus plugins al arrancar y jamás vería un sandbox nuevo.
+
+`plugin-smoke-v2.sh` corre tres casos: catálogo con el bridge en `7421`,
+catálogo con el bridge caído (fallback), y un caso informativo con una config
+V1 remanente. El assert central es que los **variantes de effort lleguen al
+runtime** — es exactamente lo que V1 perdía en silencio — y lo delega en
+`tests/assert-v2-variants.py`, que compara contra un `/api/model` real.
+
 ## Diagnóstico
 
 ```sh

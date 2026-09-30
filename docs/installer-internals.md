@@ -102,9 +102,24 @@ Si no utilizas systemd o prefieres configurar todo a mano, replica lo que hace `
        --allow-write=$HOME/.local/state/agy-bridge --allow-env agy-bridge.ts
      ```
 
+## Detección de versión de opencode
+
+`install.sh` y `scripts/sync-models.ts` comparten `scripts/opencode-version.ts`.
+La detección corre `opencode --version`, parsea la salida (`opencode v2.0.20`) y
+devuelve el target: `v2` si la mayor es `>= 2`, si no `v1`. El target decide
+**qué shape se escribe en `opencode.json`** y si el mapa de modelos se escribe
+como config o lo deja en manos del plugin.
+
+Se puede forzar con `AGY_OPENCODE_TARGET=v1|v2` (útil en tests y en máquinas
+donde la detección no aplica, p. ej. dentro de un contenedor sin el binario).
+Si la detección falla, el default es `v1` — la forma más conservadora, porque
+es la que el usuario ya tenía escrita.
+
 ## Provider OpenCode (global)
 
-El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.json` (solo global, nunca repo-local). `install.sh` lo configura automáticamente; para referencia manual:
+El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.json` (solo global, nunca repo-local). `install.sh` lo configura automáticamente. **La forma depende de la versión de opencode detectada.**
+
+### V1 (`provider`, singular, con `models`)
 
 ```json
 {
@@ -137,6 +152,50 @@ El bridge se expone como provider `agy-bridge` en `~/.config/opencode/opencode.j
 
 El plugin solo resuelve live; sin `models` en JSON no hay efforts.
 
+### V2 (`providers`, plural, sin `models`)
+
+```json
+{
+  "providers": {
+    "agy-bridge": {
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": { "baseURL": "http://127.0.0.1:7421/v1" }
+    }
+  }
+}
+```
+
+Tres diferencias, todas medidas contra `opencode v2.0.20`:
+
+1. **`providers` en plural.** V2 ignora por completo la clave `provider`
+   (singular). No emite ningún warning: una config V1 que sobreviva a una
+   actualización queda leída a medias y sin avisar. `install.sh` borra
+   `provider.agy-bridge` cuando migra a V2 justamente por esto.
+2. **`package` + `settings.baseURL` en vez de `npm` + `options.baseURL`.**
+3. **Sin `models`.** En V2 el catálogo es del plugin
+   (`ctx.provider.transform` + `ctx.provider.reload()`), y escribirlo también
+   en el config crearía una segunda copia congelada que divergiría del
+   catálogo real en silencio. Ver el razonamiento completo en
+   [Contrato del modelo](model-contract.md#dual-v1-mapa-estático-vs-v2-catálogo-del-plugin).
+
+**El plugin V2 no se referencia desde `opencode.json`.** V2 auto-descubre los
+`.ts`/`.js` del directorio de plugins del config global
+(`~/.config/opencode/plugins/`), igual que hace con los plugins de
+`gentle-ai`. Las entradas de `plugin` en el config apuntan a **directorios**, no
+a archivos: una ruta a archivo se rechaza con
+`configured plugin path must be a directory`. Para instalar a mano en V2:
+
+```sh
+cp plugins/agy-bridge.v2.bundle.ts ~/.config/opencode/plugins/agy-bridge.v2.bundle.ts
+```
+
+`agy-bridge.v2.bundle.ts` debe ir **solo**: es autocontenido a propósito,
+porque V2 carga cada `.ts`/`.js` directo de ese directorio como si fuera un
+plugin (por eso `agy-bridge-helpers.ts` no debe copiarse ahí).
+
+El runtime también necesita resolver `@opencode/plugin` desde el directorio de
+config. En una instalación normal eso ya está (`~/.config/opencode/node_modules`).
+
 - `baseURL` **debe** terminar en `/v1` — el SDK añade `/chat/completions` (sin `/v1` obtienes `404`).
 - `Host` guard en el bridge: solo `127.0.0.1:*` o `localhost:*` → `Host: evil.com` devuelve `403`.
 - Agrupación por sufijos y selección de variante: ver [Contrato del modelo](model-contract.md). **Nunca** exponer ids bare `gemini-*`/`claude-*`.
@@ -152,9 +211,23 @@ deno task sync:models
 # Previsualizar el mapa de modelos generado sin escribir archivos
 deno task sync:models --dry-run
 
+# Forzar el shape de destino (misma variable que usa install.sh)
+AGY_OPENCODE_TARGET=v2 deno task sync:models --dry-run
+
 # Especificar ruta custom de configuración o binario agy alternativo
 deno run --allow-run=agy --allow-net=127.0.0.1:7421 --allow-read --allow-write --allow-env scripts/sync-models.ts --config-path /ruta/custom/opencode.json
 ```
+
+**Qué escribe según el target:**
+
+| target | escribe |Rationale |
+|---|---|---|
+| `v1` | `provider.agy-bridge.models` (mapa completo con `variants`) | el config es la única fuente del catálogo |
+| `v2` | solo `providers.agy-bridge` (package + baseURL) | el catálogo lo publica el plugin |
+
+El mismo script de sync genera las dos formas: `buildModelMap` (V1) y
+`buildModelV2` (V2) viven en `plugins/agy-bridge-helpers.ts`, así que ambos
+targets leen el mismo mapa declarado y no pueden divergir.
 
 **Resolución en 3 niveles y Dynamic Effort:**
 
@@ -165,6 +238,11 @@ deno run --allow-run=agy --allow-net=127.0.0.1:7421 --allow-read --allow-write -
 Cualquier nuevo modelo o esfuerzo de razonamiento expuesto por Antigravity (como `high`, `medium`, `low`, `thinking`, `ultra`) se infiere y agrupa dinámicamente bajo su base correspondiente (`auto-ro-<base>` / `auto-rw-<base>`) con `variants.<effort>.reasoningEffort`. Nunca se exponen ids bare `gemini-*`/`claude-*` directamente en el provider.
 
 ## Parche del TUI gentle-ai (effort)
+
+> **Solo V1.** El parche existe porque en V1 el SDK `@ai-sdk/openai-compatible`
+> pisa `capabilities.reasoning` del mapa estático. En V2 el plugin declara
+> `capabilities` explícito en cada `Model.Info` y no hay mapa estático que
+> pisar, así que `install.sh` **no** parchea el TUI cuando el target es V2.
 
 **Por qué existe:** el provider `agy-bridge` publica cada modelo en forma plana — `reasoning: true` a nivel del modelo + `variants.*.reasoningEffort`, sin objeto `capabilities` (verificado con `cat ~/.config/opencode/opencode.json | jq` y `deno test` 80/80). Sin embargo, el SDK `@ai-sdk/openai-compatible` que usa `opencode` enriquece el modelo y deja `capabilities.reasoning` en `false` (o ausente) en `api.state.provider` (el que ve el TUI). Resultado: `/sdd-model` → effort mostraba `Model ... does not expose reasoning effort options` aunque el provider nativo y `/variant` andaban bien.
 
@@ -230,9 +308,28 @@ curl -s http://127.0.0.1:7421/v1/chat/completions -H "content-type: application/
 
 ```sh
 # Quitar provider y auth, reiniciar opencode
-# Editar ~/.config/opencode/opencode.json: borrar "provider.agy-bridge" y la entrada de "plugin"
+# V1 — Editar ~/.config/opencode/opencode.json: borrar "provider.agy-bridge" y la entrada de "plugin"
+# V2 — Editar ~/.config/opencode/opencode.json: borrar "providers.agy-bridge"
+#      y borrar el archivo del plugin: rm ~/.config/opencode/plugins/agy-bridge.v2.bundle.ts
+#      (en V2 el plugin no se referencia desde el config; se autodestruye borrando el archivo)
 # Borrar clave: jq 'del(.["agy-bridge"])' ~/.local/share/opencode/auth.json > /tmp/a.json && mv /tmp/a.json ~/.local/share/opencode/auth.json && chmod 600 ~/.local/share/opencode/auth.json
 # Reiniciar TUI y verificar: opencode models | grep -q agy-bridge && echo "still there" || echo "clean"
 ```
 
+Borrar **las dos** claves (`provider.agy-bridge` y `providers.agy-bridge`) es
+inocuo y más seguro si no sabés con qué versión se instaló: la que sobre es
+ignorada en silencio por el otro runtime.
+
 No hay cambios en `agy-bridge.ts` ni en systemd; `baseURL` loopback y `accessGuard` (Host 403, Bearer 401) permanecen.
+
+## Purga de `model-variants.json` (solo V1)
+
+`install.sh` borra la entrada `agy-bridge` de
+`~/.gentle-ai/cache/model-variants.json` porque ese caché unía genéricos
+`{high, low, medium}` en cada fila y servía para enmascarar efforts en el mapa
+estático de V1.
+
+**Esta purga está gateada a V1 a propósito.** En V2 el plugin es dueño del
+catálogo y ya filtra las variantes no declaradas en cada
+`ctx.model.transform`; el caché de `model-variants.ts` no participa del camino
+V2, y borrarlo sería tocar estado de otro plugin sin relación.
