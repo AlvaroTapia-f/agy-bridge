@@ -147,14 +147,37 @@ var V2_LIMIT = {
   context: 2e5,
   output: 32e3
 };
+var V2_COST = [
+  {
+    input: 0,
+    output: 0,
+    cache: {
+      read: 0,
+      write: 0
+    }
+  }
+];
+var V2_RELEASED = 17672256e5;
+function v2Cost() {
+  return V2_COST.map((tier) => ({
+    ...tier,
+    cache: {
+      ...tier.cache
+    }
+  }));
+}
 function buildModelV2(bases) {
   const models = [];
   eachModelProfile(bases, ({ id, efforts }) => {
     models.push({
       id,
+      // agy resolves every entry path by the full suffixed slug, so the catalog
+      // id and the wire model id are the same string.
+      modelID: id,
       providerID: V2_PROVIDER_ID,
       name: id,
       enabled: true,
+      status: "active",
       capabilities: {
         ...V2_CAPABILITIES,
         input: [
@@ -170,6 +193,10 @@ function buildModelV2(bases) {
       compatibility: {
         reasoningField: V2_REASONING_FIELD
       },
+      time: {
+        released: V2_RELEASED
+      },
+      cost: v2Cost(),
       variants: [
         ...efforts
       ].sort().map((effort) => ({
@@ -276,8 +303,7 @@ var plugin = Plugin.define({
       editor.method.update({
         integrationID: PROVIDER_ID,
         method: {
-          id: "api",
-          type: "api-key",
+          type: "key",
           label: "AGY Token (paste from ~/.config/agy-bridge/env)"
         }
       });

@@ -24,6 +24,7 @@ import {
   groupBases,
   MODEL_MAP_VERSION,
   reasoningEffortFor,
+  V2_RELEASED,
 } from "./agy-bridge-helpers.ts";
 
 type AddedProvider = { info: ProviderInfo; models: readonly ModelInfo[] };
@@ -138,9 +139,8 @@ async function sha256Hex(text: string): Promise<string> {
     "SHA-256",
     new TextEncoder().encode(text),
   );
-  return [...new Uint8Array(digest)].map((b) =>
-    b.toString(16).padStart(2, "0")
-  ).join("");
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 /** Records agy-bridge models in a replayable registry, V2 shape. */
@@ -175,7 +175,9 @@ Deno.test("v2 resolveSlugs: returns live ids when bridge responds", async () => 
   const orig = globalThis.fetch;
   globalThis.fetch = () =>
     Promise.resolve(
-      new Response(JSON.stringify({ object: "list", data: [{ id: "live-model-high" }] })),
+      new Response(
+        JSON.stringify({ object: "list", data: [{ id: "live-model-high" }] }),
+      ),
     );
   try {
     assertEquals(await resolveSlugs("k"), ["live-model-high"]);
@@ -200,7 +202,10 @@ Deno.test("v2 buildV2Models: FALLBACK yields 14 ids, variants array, no V1 shape
     assertEquals(m.variants!.map((v) => v.id), expected, `${m.id} variant ids`);
   }
   const opus = models.find((m) => m.id === "auto-ro-claude-opus-4-6")!;
-  assertEquals(opus.variants, [{ id: "thinking", settings: { reasoningEffort: "max" } }]);
+  assertEquals(opus.variants, [{
+    id: "thinking",
+    settings: { reasoningEffort: "max" },
+  }]);
   const singleton = models.find((m) => m.id === "auto-ro-claude-sonnet-4-6")!;
   assertEquals(singleton.variants, []);
 });
@@ -209,7 +214,10 @@ Deno.test("v2 providerInfo: openai-compatible package pointed at the bridge", ()
   const info = providerInfo();
   assertEquals(info.id, "agy-bridge");
   assertEquals(info.package, "@opencode/ai/providers/openai-compatible");
-  assertEquals((info.settings as Record<string, unknown>).baseURL, BRIDGE_BASE_URL);
+  assertEquals(
+    (info.settings as Record<string, unknown>).baseURL,
+    BRIDGE_BASE_URL,
+  );
 });
 
 Deno.test("v2 setup: preloads slugs, registers integration method + provider, cleanup clears timer", async () => {
@@ -220,6 +228,22 @@ Deno.test("v2 setup: preloads slugs, registers integration method + provider, cl
     const cleanup = await plugin.setup(ctx);
     assertEquals(ctx.methods.length, 1);
     assertEquals(ctx.methods[0].integrationID, "agy-bridge");
+    // The integration method must satisfy the real V2 Integration.KeyMethod
+    // schema: { type: "key"; label?; form? }, additionalProperties: false.
+    // Asserted structurally here because a wrong `type` only fails against the
+    // live runtime — it silently kills plugin setup and unregisters the
+    // provider plus every model.
+    assertEquals(ctx.methods[0].method, {
+      type: "key",
+      label: "AGY Token (paste from ~/.config/agy-bridge/env)",
+    });
+    assertEquals(
+      Object.keys(ctx.methods[0].method as Record<string, unknown>).includes(
+        "id",
+      ),
+      false,
+      "KeyMethod must not carry an id field",
+    );
     assertEquals(ctx.added.length, 1);
     assertEquals(ctx.added[0].info.id, "agy-bridge");
     // Preloaded fallback catalog (bridge down): 7 bases x 2 profiles.
@@ -274,14 +298,22 @@ Deno.test("T2 buildModelV2: variants is an array of {id, settings.reasoningEffor
   for (const m of models) {
     const base = m.id.replace(/^auto-(ro|rw)-/, "");
     const declared = [...(bases.get(base) ?? new Set<string>())].sort();
-    assertEquals(Array.isArray(m.variants), true, `${m.id} variants is an array`);
+    assertEquals(
+      Array.isArray(m.variants),
+      true,
+      `${m.id} variants is an array`,
+    );
     assertEquals(
       m.variants.map((v) => v.id),
       declared,
       `${m.id} exposes exactly the declared efforts`,
     );
     for (const v of m.variants) {
-      assertEquals(Object.keys(v).sort(), ["id", "settings"], `${m.id}/${v.id} keys`);
+      assertEquals(
+        Object.keys(v).sort(),
+        ["id", "settings"],
+        `${m.id}/${v.id} keys`,
+      );
       assertEquals(
         v.settings,
         { reasoningEffort: v.id === "thinking" ? "max" : v.id },
@@ -326,13 +358,51 @@ Deno.test("T2 buildModelV2: no V1-only shape anywhere in the emitted models", ()
         "provider",
         "modalities",
         "tool_call",
-        "status",
+        "release_date",
+        "cache_read",
+        "cache_write",
       ]
     ) {
       assertEquals(key in rec, false, `${m.id} must not carry V1 key "${key}"`);
     }
     // V1 `variants` was an object; V2 is an array (migrate-v1 "Models and variants").
     assertEquals(Array.isArray(m.variants), true, `${m.id} variants array`);
+  }
+});
+
+Deno.test("T2 buildModelV2: every field the V2 Model.Info schema requires is present", () => {
+  // Model.Info is additionalProperties:false and requires all of these. Omitting
+  // `time.released` makes the runtime throw while sorting the catalog, which
+  // surfaces only as an opaque /api/model 500 with zero models.
+  const REQUIRED = [
+    "id",
+    "modelID",
+    "providerID",
+    "name",
+    "capabilities",
+    "variants",
+    "time",
+    "cost",
+    "status",
+    "enabled",
+    "limit",
+  ];
+  const models = buildModelV2(groupBases(FALLBACK_MODELS));
+  assertEquals(models.length, 14);
+  for (const m of models) {
+    const rec = m as unknown as Record<string, unknown>;
+    for (const key of REQUIRED) {
+      assertEquals(
+        key in rec,
+        true,
+        `${m.id} is missing required Model.Info field "${key}"`,
+      );
+    }
+    assertEquals(typeof rec.modelID, "string");
+    assertEquals((rec.time as { released: unknown }).released, V2_RELEASED);
+    assertEquals(Array.isArray(rec.cost), true);
+    assertEquals((rec.cost as unknown[]).length > 0, true);
+    assertEquals(rec.status, "active");
   }
 });
 
@@ -352,7 +422,11 @@ Deno.test("T2 buildModelV2: capabilities + compatibility.reasoningField replace 
       `${m.id} compatibility`,
     );
     // Documented V2 fallback limits for a model absent from the catalog.
-    assertEquals(m.limit, { context: 200_000, output: 32_000 }, `${m.id} limit`);
+    assertEquals(
+      m.limit,
+      { context: 200_000, output: 32_000 },
+      `${m.id} limit`,
+    );
   }
   // Every model declares capabilities (V2 requires them), including singletons.
   const singleton = models.find((m) => m.id === "auto-ro-claude-sonnet-4-6")!;
@@ -408,7 +482,10 @@ Deno.test("T2 shared core: V1 and V2 declare the same ids and the same effort se
 Deno.test("T2 declaredVariantsByModel: keyed by model id, singletons map to an empty set", () => {
   const declared = declaredVariantsByModel(groupBases(FALLBACK_MODELS));
   assertEquals(declared.size, 14);
-  assertEquals(declared.get("auto-ro-gemini-3.1-pro"), new Set(["high", "low"]));
+  assertEquals(
+    declared.get("auto-ro-gemini-3.1-pro"),
+    new Set(["high", "low"]),
+  );
   assertEquals(declared.get("auto-rw-claude-opus-4-6"), new Set(["thinking"]));
   assertEquals(declared.get("auto-ro-claude-sonnet-4-6"), new Set());
   assertEquals(declared.get("auto-ro-nope"), undefined);
@@ -416,7 +493,9 @@ Deno.test("T2 declaredVariantsByModel: keyed by model id, singletons map to an e
 
 Deno.test("T2 filterUndeclaredVariants: keeps declared, drops union-injected, passes unknown ids through", () => {
   const declared = new Set(["high", "low"]);
-  const variants = [{ id: "high" }, { id: "medium" }, { id: "low" }, { id: "thinking" }];
+  const variants = [{ id: "high" }, { id: "medium" }, { id: "low" }, {
+    id: "thinking",
+  }];
   assertEquals(
     filterUndeclaredVariants(variants, declared).map((v) => v.id),
     ["high", "low"],
@@ -436,7 +515,9 @@ Deno.test("T2 setup: model transform masks union-injected variants end-to-end", 
     const registry = registryOf(buildModelV2(groupBases(FALLBACK_MODELS)));
     // Simulate the union the V1 contract had to defend against: generic
     // efforts appear on rows that never declared them.
-    const pro = registry.records[0].models.find((m) => m.id === "auto-ro-gemini-3.1-pro")!;
+    const pro = registry.records[0].models.find((m) =>
+      m.id === "auto-ro-gemini-3.1-pro"
+    )!;
     pro.variants = [{ id: "high" }, { id: "medium" }, { id: "low" }];
     registry.records[0].models.push({
       id: "auto-ro-gemini-9.9-ultra",

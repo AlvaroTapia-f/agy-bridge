@@ -40,10 +40,47 @@ export type ProviderInfo = {
   [k: string]: unknown;
 };
 
-export type IntegrationMethod = {
-  id: string;
-  [k: string]: unknown;
+/**
+ * Mirrors the OpenAPI `Integration.Method` union: OAuthMethod / CommandMethod /
+ * KeyMethod / EnvMethod, each `additionalProperties: false`.
+ *
+ * `KeyMethod` (what agy-bridge registers) is `{ type: "key"; label?: string;
+ * form?: Form.Fields }` — it carries NO `id`, unlike the oauth and command
+ * variants. The stub used to require `id` and let any `type` through, which is
+ * why the wrong `type: "api-key"` passed the local suite and only failed at
+ * runtime against the real V2 schema. Keep this discriminated so a bad shape
+ * fails at type-check time instead of at plugin load.
+ */
+export type IntegrationKeyMethod = {
+  type: "key";
+  label?: string;
+  form?: unknown;
 };
+
+export type IntegrationOAuthMethod = {
+  id: string;
+  type: "oauth";
+  label: string;
+  form?: unknown;
+};
+
+export type IntegrationCommandMethod = {
+  id: string;
+  type: "command";
+  label: string;
+  command: string[];
+};
+
+export type IntegrationEnvMethod = {
+  type: "env";
+  names: string[];
+};
+
+export type IntegrationMethod =
+  | IntegrationKeyMethod
+  | IntegrationOAuthMethod
+  | IntegrationCommandMethod
+  | IntegrationEnvMethod;
 
 export type ConnectionInfo = {
   [k: string]: unknown;
@@ -124,7 +161,9 @@ export type PluginCleanup = () => void | Promise<void>;
 
 export type PluginDefinition = {
   id: string;
-  setup: (ctx: PluginContext) => Promise<PluginCleanup | void> | PluginCleanup | void;
+  setup: (
+    ctx: PluginContext,
+  ) => Promise<PluginCleanup | void> | PluginCleanup | void;
 };
 
 export const Plugin = {

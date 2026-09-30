@@ -346,8 +346,12 @@ export function buildModelMap(bases: Map<string, Set<string>>): Record<string, u
 //   context, 32k output). The bridge does not advertise its own, and V2
 //   requires both fields, so we pin the documented defaults instead of
 //   letting them float.
-// - `api`/`cost`/`time`/`status`/`request` are provider/runtime owned; they are
-//   omitted so the runtime defaults apply rather than inventing agy pricing.
+// - `api` and `request` are provider/runtime owned and omitted.
+// - `cost`/`time`/`status` are NOT optional in the OpenAPI `Model.Info` schema
+//   (see ModelV2 below), even though migrate-v1 lists `release_date` and
+//   `status` among accepted-but-unsupported V1 model fields: those are the V1
+//   names. The V2 names (`time.released`, `cost[]`, `status`) are required, so
+//   they are emitted explicitly rather than left to runtime defaults.
 
 export const V2_PROVIDER_ID = "agy-bridge"
 export const V2_REASONING_FIELD = "reasoning_content"
@@ -357,15 +361,35 @@ export type ModelVariantV2 = {
   settings: { reasoningEffort: string }
 }
 
+/**
+ * V2 `Model.Info` as required by the OpenAPI schema, NOT by the prose examples
+ * on /v2/docs/models. `Model.Info` is `additionalProperties: false` and
+ * `required: [id, modelID, providerID, name, capabilities, variants, time,
+ * cost, status, enabled, limit]`.
+ *
+ * A shape built from the docs alone omits `modelID`/`time`/`status`/`cost` and
+ * the runtime dies while sorting the catalog ("undefined is not an object
+ * (evaluating '$H.time.released')"), which surfaces only as an opaque HTTP 500
+ * from /api/model with zero models. Verified against opencode v2.0.20.
+ */
 export type ModelV2 = {
   id: string
+  modelID: string
   providerID: string
   name: string
   enabled: boolean
+  status: "active"
   capabilities: { tools: boolean; input: string[]; output: string[] }
   limit: { context: number; output: number }
   compatibility: { reasoningField: string }
   variants: ModelVariantV2[]
+  // Unix ms. agy does not advertise a release date, so this is a fixed
+  // catalog-ordering value, not a claim about the model. It must be present:
+  // the runtime dereferences `time.released` unconditionally.
+  time: { released: number }
+  // agy exposes no pricing. Model.Cost requires input/output/cache, so an
+  // explicit zero is the honest shape — the alternative is inventing prices.
+  cost: Array<{ input: number; output: number; cache: { read: number; write: number } }>
 }
 
 const V2_CAPABILITIES: ModelV2["capabilities"] = {
@@ -375,6 +399,23 @@ const V2_CAPABILITIES: ModelV2["capabilities"] = {
 }
 
 const V2_LIMIT: ModelV2["limit"] = { context: 200_000, output: 32_000 }
+
+/** Zero-priced tier: agy bills nothing we can read. See ModelV2.cost. */
+const V2_COST: ModelV2["cost"] = [{
+  input: 0,
+  output: 0,
+  cache: { read: 0, write: 0 },
+}]
+
+/**
+ * Catalog ordering value for every agy model (2026-01-01T00:00:00Z). Not a
+ * release-date claim; the runtime only needs it present and sortable.
+ */
+export const V2_RELEASED = 1_767_225_600_000
+
+function v2Cost(): ModelV2["cost"] {
+  return V2_COST.map((tier) => ({ ...tier, cache: { ...tier.cache } }))
+}
 
 /**
  * V2 model inventory: one `Model.Info` per (base, profile) with declared
@@ -386,12 +427,18 @@ export function buildModelV2(bases: Map<string, Set<string>>): ModelV2[] {
   eachModelProfile(bases, ({ id, efforts }) => {
     models.push({
       id,
+      // agy resolves every entry path by the full suffixed slug, so the catalog
+      // id and the wire model id are the same string.
+      modelID: id,
       providerID: V2_PROVIDER_ID,
       name: id,
       enabled: true,
+      status: "active",
       capabilities: { ...V2_CAPABILITIES, input: [...V2_CAPABILITIES.input], output: [...V2_CAPABILITIES.output] },
       limit: { ...V2_LIMIT },
       compatibility: { reasoningField: V2_REASONING_FIELD },
+      time: { released: V2_RELEASED },
+      cost: v2Cost(),
       variants: [...efforts].sort().map((effort) => ({
         id: effort,
         settings: { reasoningEffort: reasoningEffortFor(effort) },

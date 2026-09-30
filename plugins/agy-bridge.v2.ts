@@ -112,12 +112,16 @@ const plugin = Plugin.define({
     // provider read already reflects the bridge (fallback when down).
     await loadSlugs();
 
+    // V1 declared `{ type: "api" }`; V2's Integration.KeyMethod schema accepts
+    // `type: "key"` with `label`/`form` and rejects any extra key
+    // (additionalProperties: false), so no `id` here. A wrong `type` value
+    // fails the whole integration schema, which kills plugin setup and leaves
+    // the provider and every model unregistered — a silent-looking breakage.
     await ctx.integration.transform((editor) => {
       editor.method.update({
         integrationID: PROVIDER_ID,
         method: {
-          id: "api",
-          type: "api-key",
+          type: "key",
           label: "AGY Token (paste from ~/.config/agy-bridge/env)",
         },
       });
@@ -151,7 +155,9 @@ const plugin = Plugin.define({
     };
 
     const timer = setInterval(() => {
-      void refresh().catch((err) => console.error("[agy-bridge.v2] refresh:", err));
+      void refresh().catch((err) =>
+        console.error("[agy-bridge.v2] refresh:", err)
+      );
     }, refreshIntervalMs(ctx));
 
     return () => clearInterval(timer);
