@@ -4,6 +4,16 @@ import {
   FALLBACK_MODELS,
   MODEL_MAP_VERSION,
 } from "../plugins/agy-bridge-helpers.ts";
+import {
+  BRIDGE_BASE_URL,
+  type CommandRunner,
+  type OpenCodeTarget,
+  type VersionDetection,
+  describeDetection,
+  normalizeTarget,
+  V2_PACKAGE,
+  detectOpenCodeTarget,
+} from "./opencode-version.ts";
 
 /**
  * Parses `agy models` TSV output into a list of model slug strings.
@@ -65,13 +75,32 @@ export interface SyncModelsOptions extends ResolveSlugsOptions {
   dryRun?: boolean;
   printJson?: boolean;
   fs?: SyncFs;
+  /**
+   * Explicit OpenCode major version. When omitted the target is detected via
+   * `detectOpenCodeTarget` (`AGY_OPENCODE_TARGET` > `opencode --version` >
+   * existing-config shape > `v1` default).
+   */
+  target?: OpenCodeTarget;
+  /** Spawns `opencode --version` during detection. Omit to skip that step. */
+  versionRunner?: CommandRunner | null;
+  opencodeBin?: string;
+  /**
+   * V1 plugin path to strip from `plugin[]` when converting to V2. Left empty
+   * by default so a standalone `deno task sync:models` never guesses a path.
+   */
+  v1PluginPath?: string;
 }
 
 export interface SyncModelsResult {
+  /** Models actually persisted into the config file (0 on V2 — see below). */
   count: number;
+  /** Models resolved from the live catalog, regardless of what was persisted. */
+  resolved: number;
   source: ResolutionSource;
   models: Record<string, unknown>;
   modelMapVersion: number;
+  target: OpenCodeTarget;
+  detection: VersionDetection;
   configPath?: string;
 }
 
@@ -185,16 +214,118 @@ export function getDefaultConfigPath(): string {
   return `${home}/.config/opencode/opencode.json`;
 }
 
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Removes our own legacy V1 entries from a config being converted to the native
+ * V2 shape.
+ *
+ * Two stale keys are actively harmful in V2 and are safe to drop because we own
+ * the `agy-bridge` provider id and our plugin path:
+ *
+ * - `provider["agy-bridge"]`: V1 kept working in V2, but its `models` carry the
+ *   V1 fields `reasoning` and boolean `interleaved`, which V2 explicitly lists
+ *   as "accepted but unsupported" and ignores *with a warning*
+ *   (https://opencode.ai/v2/docs/migrate-v1). Leaving it also duplicates the
+ *   source of truth for the catalog.
+ * - `plugin` entries pointing at the V1 plugin file: V1 plugin implementations
+ *   do not run in V2, so a stale reference loads a file that cannot register.
+ *
+ * Only entries that match agy-bridge are removed; every other provider and
+ * plugin entry is preserved untouched.
+ */
+export function pruneLegacyV1Entries(
+  config: Record<string, unknown>,
+  v1PluginPath: string,
+): void {
+  if (isPlainObject(config.provider) && "agy-bridge" in config.provider) {
+    const providers = { ...config.provider };
+    delete providers["agy-bridge"];
+    config.provider = providers;
+  }
+  if (Array.isArray(config.plugin)) {
+    const kept = config.plugin.filter((entry) =>
+      typeof entry === "string" ? entry !== v1PluginPath : true
+    );
+    if (kept.length === config.plugin.length) return;
+    if (kept.length === 0) {
+      delete config.plugin;
+    } else {
+      config.plugin = kept;
+    }
+  }
+}
+
+/**
+ * Writes the agy-bridge provider block in the shape for `target`.
+ *
+ * V1 (`provider` / `npm` / `options.baseURL`): the static `models` map is the
+ * source of truth, because the V1 plugin's `provider.models` hook is not what
+ * drives `/models` reliably across V1 patch versions.
+ *
+ * V2 (`providers` / `package` / `settings.baseURL`): the static `models` map is
+ * deliberately NOT written. The V2 plugin registers the provider AND its
+ * catalog through `ctx.provider.transform` -> `editor.add({info, models})`
+ * (https://opencode.ai/v2/docs/build/plugins), and config `providers.<id>.models`
+ * is documented as "models to add or override" — i.e. a second, frozen copy of a
+ * catalog the plugin already refreshes on `ctx.provider.reload()`. Writing it
+ * would duplicate the source of truth and, since `buildModelMap` emits V1 shape,
+ * make V2 warn on every model about `reasoning`/`interleaved`. See
+ * docs/model-contract.md.
+ */
+export function buildProviderEntry(
+  target: OpenCodeTarget,
+  existing: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const prior = isPlainObject(existing) ? existing : {};
+  if (target === "v1") {
+    const options = isPlainObject(prior.options) ? { ...prior.options } : {};
+    return {
+      ...prior,
+      npm: "@ai-sdk/openai-compatible",
+      name: prior.name ?? "AGY Bridge",
+      options: { ...options, baseURL: BRIDGE_BASE_URL },
+    };
+  }
+  const settings = isPlainObject(prior.settings) ? { ...prior.settings } : {};
+  return {
+    ...prior,
+    name: prior.name ?? "AGY Bridge",
+    package: V2_PACKAGE,
+    settings: { ...settings, baseURL: BRIDGE_BASE_URL },
+  };
+}
+
 /**
  * Synchronizes models from agy -> opencode.json using atomic read-modify-write.
  */
 export async function syncModels(
   options: SyncModelsOptions = {},
 ): Promise<SyncModelsResult> {
+  const fs = options.fs || defaultFs;
+  const configPath = options.configPath || getDefaultConfigPath();
+  if (!configPath) {
+    throw new Error("Cannot determine opencode.json config path");
+  }
+
+  // Resolve the target before resolving slugs: on V2 the catalog is the
+  // plugin's job, so an unreachable bridge must not fail the installer.
+  const detection = await detectOpenCodeTarget({
+    target: options.target,
+    runner: options.versionRunner,
+    opencodeBin: options.opencodeBin,
+    readTextFile: options.fs ? (path) => options.fs!.readTextFile(path) : undefined,
+    configPath: options.configPath,
+  });
+  const target = detection.target;
+
   const resolution = await resolveSlugs(options);
   const bases = groupBases(resolution.slugs);
   const models = buildModelMap(bases);
-  const count = Object.keys(models).length;
+  const resolved = Object.keys(models).length;
+  const count = target === "v1" ? resolved : 0;
 
   if (options.dryRun) {
     if (options.printJson !== false) {
@@ -202,16 +333,13 @@ export async function syncModels(
     }
     return {
       count,
+      resolved,
       source: resolution.source,
       models,
       modelMapVersion: MODEL_MAP_VERSION,
+      target,
+      detection,
     };
-  }
-
-  const fs = options.fs || defaultFs;
-  const configPath = options.configPath || getDefaultConfigPath();
-  if (!configPath) {
-    throw new Error("Cannot determine opencode.json config path");
   }
 
   // Ensure directory exists
@@ -254,27 +382,35 @@ export async function syncModels(
     existingConfig = {};
   }
 
-  const providers = (
-    existingConfig.provider &&
-    typeof existingConfig.provider === "object" &&
-    !Array.isArray(existingConfig.provider)
-  ) ? existingConfig.provider as Record<string, Record<string, unknown>> : {};
-  existingConfig.provider = providers;
+  if (target === "v2") {
+    // Native V2 shape. Prune our own V1 leftovers first so the config holds a
+    // single source of truth per key (see pruneLegacyV1Entries).
+    pruneLegacyV1Entries(existingConfig, options.v1PluginPath ?? "");
+    const providers = isPlainObject(existingConfig.providers)
+      ? existingConfig.providers
+      : {};
+    providers["agy-bridge"] = buildProviderEntry(
+      target,
+      providers["agy-bridge"] as Record<string, unknown> | undefined,
+    );
+    existingConfig.providers = providers;
+  } else {
+    const providers = (
+      existingConfig.provider &&
+      typeof existingConfig.provider === "object" &&
+      !Array.isArray(existingConfig.provider)
+    ) ? existingConfig.provider as Record<string, Record<string, unknown>> : {};
+    existingConfig.provider = providers;
 
-  const agyBridgeConfig = (
-    providers["agy-bridge"] &&
-    typeof providers["agy-bridge"] === "object" &&
-    !Array.isArray(providers["agy-bridge"])
-  ) ? providers["agy-bridge"] : {
-    npm: "@ai-sdk/openai-compatible",
-    options: {
-      baseURL: "http://127.0.0.1:7421/v1",
-    },
-  };
-  providers["agy-bridge"] = agyBridgeConfig;
+    const agyBridgeConfig = buildProviderEntry(
+      target,
+      providers["agy-bridge"] as Record<string, unknown> | undefined,
+    );
+    providers["agy-bridge"] = agyBridgeConfig;
 
-  // Update models key specifically
-  agyBridgeConfig.models = models;
+    // Update models key specifically (V1 keeps the static map as source of truth)
+    agyBridgeConfig.models = models;
+  }
 
   // Atomic write: write to tmp file then rename
   const tmpPath = `${configPath}.tmp.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -284,9 +420,12 @@ export async function syncModels(
 
   return {
     count,
+    resolved,
     source: resolution.source,
     models,
     modelMapVersion: MODEL_MAP_VERSION,
+    target,
+    detection,
     configPath,
   };
 }
@@ -298,6 +437,8 @@ if (import.meta.main) {
   let configPath: string | undefined;
   let agyBin: string | undefined;
   let bridgeUrl: string | undefined;
+  let target: OpenCodeTarget | undefined;
+  let v1PluginPath: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -315,6 +456,24 @@ if (import.meta.main) {
       bridgeUrl = args[++i];
     } else if (arg.startsWith("--bridge-url=")) {
       bridgeUrl = arg.slice("--bridge-url=".length);
+    } else if (arg === "--target" && i + 1 < args.length) {
+      const parsed = normalizeTarget(args[++i]);
+      if (!parsed) {
+        console.error(`[agy-bridge] Invalid --target '${args[i]}' (expected v1 or v2)`);
+        Deno.exit(1);
+      }
+      target = parsed;
+    } else if (arg.startsWith("--target=")) {
+      const parsed = normalizeTarget(arg.slice("--target=".length));
+      if (!parsed) {
+        console.error(`[agy-bridge] Invalid --target in '${arg}' (expected v1 or v2)`);
+        Deno.exit(1);
+      }
+      target = parsed;
+    } else if (arg === "--v1-plugin-path" && i + 1 < args.length) {
+      v1PluginPath = args[++i];
+    } else if (arg.startsWith("--v1-plugin-path=")) {
+      v1PluginPath = arg.slice("--v1-plugin-path=".length);
     } else if (arg === "-h" || arg === "--help") {
       console.log(`Usage: deno run [permissions] scripts/sync-models.ts [options]
 
@@ -323,6 +482,8 @@ Options:
   --config-path <path>  Target opencode.json config file path
   --agy-bin <bin>       Path or name of agy binary (default: $AGY_BIN or 'agy')
   --bridge-url <url>    Bridge API URL (default: $AGY_BRIDGE_URL or 'http://127.0.0.1:7421')
+  --target <v1|v2>      Force the OpenCode config shape (default: auto-detect)
+  --v1-plugin-path <p>  V1 plugin path to drop from plugin[] when targeting v2
   -h, --help            Show this help message
 `);
       Deno.exit(0);
@@ -335,11 +496,21 @@ Options:
       configPath,
       agyBin,
       bridgeUrl,
+      target,
+      v1PluginPath,
+      versionRunner: target ? null : defaultRunner,
     });
     if (!dryRun) {
-      console.log(
-        `[agy-bridge] Synchronized ${result.count} models from ${result.source} to ${result.configPath} (model map v${result.modelMapVersion})`,
-      );
+      if (result.target === "v2") {
+        console.log(
+          `[agy-bridge] Registered providers.agy-bridge (${V2_PACKAGE}) to ${result.configPath} — catalog is published at runtime by the V2 plugin (${result.resolved} models resolved from ${result.source}, not written to config)`,
+        );
+      } else {
+        console.log(
+          `[agy-bridge] Synchronized ${result.count} models from ${result.source} to ${result.configPath} (model map v${result.modelMapVersion})`,
+        );
+      }
+      console.log(`[agy-bridge] ${describeDetection(result.detection)}`);
     }
   } catch (err) {
     console.error(

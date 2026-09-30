@@ -10,6 +10,12 @@ if [[ -d "$HOME/.local/bin" && ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
+# Sections 1-8 pin the installer to the V1 config shape. Without this the
+# ambient `opencode` on the developer's machine (V2 on this branch) would be
+# detected and the whole suite would assert the V2 branch instead. Section 9
+# overrides it explicitly to exercise the V2 branch.
+export AGY_OPENCODE_TARGET="v1"
+
 FAILED=0
 PASSED=0
 
@@ -329,6 +335,183 @@ assert "second run reports already-patched" '
 '
 
 rm -rf "$TMP_DIR6"
+
+
+# ------------------------------------------------------------------------------
+# 9. V2 Branch: native config shape, V2 bundle, legacy patches gated off
+# ------------------------------------------------------------------------------
+echo "--- 9. V2 Config Shape Branch ---"
+TMP_DIR7="$(mktemp -d)"
+MOCK_HOME7="$TMP_DIR7/home"
+MOCK_CONFIG7="$TMP_DIR7/home/.config"
+MOCK_BIN7="$TMP_DIR7/bin"
+mkdir -p "$MOCK_CONFIG7/opencode/plugins" "$MOCK_HOME7/.gentle-ai/cache" "$MOCK_BIN7"
+
+cat << 'MOCK' > "$MOCK_BIN7/agy"
+#!/usr/bin/env bash
+if [[ "${1:-}" == "models" ]]; then
+  echo -e "gemini-3.8-flash-high\tGemini 3.8 Flash High"
+  echo -e "gemini-3.8-flash-ultra\tGemini 3.8 Flash Ultra"
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN7/agy"
+
+# Seed a config already converted to the native V2 shape, holding another
+# provider that must survive untouched.
+cat << 'JSON' > "$MOCK_CONFIG7/opencode/opencode.json"
+{
+  "providers": {
+    "openai": {
+      "package": "@opencode/ai/providers/openai",
+      "models": { "gpt-4o": {} }
+    }
+  },
+  "plugins": ["./plugins/other.ts"]
+}
+JSON
+
+OUTPUT_V2="$(PATH="$MOCK_BIN7:$PATH" AGY_OPENCODE_TARGET=v2 HOME="$MOCK_HOME7" XDG_CONFIG_HOME="$MOCK_CONFIG7" "$INSTALL_SCRIPT" 2>&1 || true)"
+V2_CONFIG="$MOCK_CONFIG7/opencode/opencode.json"
+
+assert "V2 branch is reported by the installer" 'echo "$OUTPUT_V2" | grep -q "OpenCode target: v2"'
+assert "V2 bundle installed as agy-bridge.v2.bundle.ts" '[[ -f "$MOCK_CONFIG7/opencode/plugins/agy-bridge.v2.bundle.ts" ]]'
+assert "V1 bundle NOT installed in V2 mode" '[[ ! -f "$MOCK_CONFIG7/opencode/plugins/agy-bridge.ts" ]]'
+assert "providers.agy-bridge written with native package" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); e=d[\"providers\"][\"agy-bridge\"]; assert e[\"package\"]==\"@opencode/ai/providers/openai-compatible\", e"
+'
+assert "providers.agy-bridge uses settings.baseURL (not options.baseURL)" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); e=d[\"providers\"][\"agy-bridge\"]; assert e[\"settings\"][\"baseURL\"]==\"http://127.0.0.1:7421/v1\" and \"options\" not in e, e"
+'
+assert "V2 branch writes NO static model map (plugin owns the catalog)" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert \"models\" not in d[\"providers\"][\"agy-bridge\"], d[\"providers\"][\"agy-bridge\"]"
+'
+assert "V2 branch never writes the singular provider key" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert \"provider\" not in d, d.get(\"provider\")"
+'
+assert "V2 branch never writes the singular plugin key" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert \"plugin\" not in d, d.get(\"plugin\")"
+'
+assert "V2 branch preserves other providers" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert d[\"providers\"][\"openai\"][\"models\"][\"gpt-4o\"]=={}, d[\"providers\"]"
+'
+assert "V2 branch preserves unrelated plugin entries" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert \"./plugins/other.ts\" in d[\"plugins\"], d[\"plugins\"]"
+'
+assert "V2 branch skips the V1 model-variants.json purge" 'echo "$OUTPUT_V2" | grep -q "Skipping model-variants.json purge"'
+assert "V2 branch skips the V1 model-variants.ts patch" 'echo "$OUTPUT_V2" | grep -q "Skipping model-variants.ts patch"'
+assert "V2 branch skips the V1 gentle-ai TUI patch" 'echo "$OUTPUT_V2" | grep -q "Skipping gentle-ai TUI effort patch"'
+
+# Legacy V1 leftovers must be pruned when converting an existing V1 config.
+# Unquoted heredoc: the plugin[] entry must contain the literal expanded path.
+cat << JSON > "$MOCK_CONFIG7/opencode/opencode.json"
+{
+  "provider": {
+    "openai": { "npm": "@ai-sdk/openai", "models": { "gpt-4o": {} } },
+    "agy-bridge": { "npm": "@ai-sdk/openai-compatible", "options": { "baseURL": "http://127.0.0.1:7421/v1" }, "models": { "auto-ro-gemini-3.7-flash": { "reasoning": true, "interleaved": { "field": "reasoning_content" }, "variants": { "high": { "reasoningEffort": "high" } } } } }
+  },
+  "plugin": ["$MOCK_CONFIG7/opencode/plugins/agy-bridge.ts", "keep-me.ts"]
+}
+JSON
+
+OUTPUT_V2B="$(PATH="$MOCK_BIN7:$PATH" AGY_OPENCODE_TARGET=v2 HOME="$MOCK_HOME7" XDG_CONFIG_HOME="$MOCK_CONFIG7" "$INSTALL_SCRIPT" 2>&1 || true)"
+
+assert "converting a V1 config drops provider.agy-bridge" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert \"agy-bridge\" not in d[\"provider\"], d[\"provider\"]"
+'
+assert "converting a V1 config keeps provider.openai" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert d[\"provider\"][\"openai\"][\"npm\"]==\"@ai-sdk/openai\", d[\"provider\"]"
+'
+assert "converting a V1 config drops only our own plugin[] entry" '
+  python3 -c "import json; d=json.load(open(\"$V2_CONFIG\")); assert d[\"plugin\"]==[\"keep-me.ts\"], d[\"plugin\"]"
+'
+assert "converting a V1 config leaves no reasoning/interleaved in providers" '
+  python3 -c "
+import json
+d = json.load(open(\"$V2_CONFIG\"))
+entry = d[\"providers\"][\"agy-bridge\"]
+assert \"reasoning\" not in entry and \"interleaved\" not in entry, entry
+assert \"models\" not in entry, entry
+"
+'
+
+# Idempotency on the V2 branch.
+AGY_OPENCODE_TARGET=v2 HOME="$MOCK_HOME7" XDG_CONFIG_HOME="$MOCK_CONFIG7" PATH="$MOCK_BIN7:$PATH" "$INSTALL_SCRIPT" >/dev/null 2>&1 || true
+assert "V2 branch is idempotent (valid JSON, one agy-bridge entry)" '
+  python3 -c "
+import json
+d = json.load(open(\"$V2_CONFIG\"))
+assert list(d[\"providers\"].keys()).count(\"agy-bridge\") == 1
+assert d[\"providers\"][\"agy-bridge\"][\"settings\"][\"baseURL\"] == \"http://127.0.0.1:7421/v1\"
+"
+'
+
+rm -rf "$TMP_DIR7"
+
+# ------------------------------------------------------------------------------
+# 10. Detection: --version parse drives the branch without any override
+# ------------------------------------------------------------------------------
+echo "--- 10. Version Detection Branch ---"
+TMP_DIR8="$(mktemp -d)"
+MOCK_HOME8="$TMP_DIR8/home"
+MOCK_CONFIG8="$TMP_DIR8/home/.config"
+MOCK_BIN8="$TMP_DIR8/bin"
+mkdir -p "$MOCK_CONFIG8/opencode" "$MOCK_BIN8"
+
+printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_BIN8/agy"
+chmod +x "$MOCK_BIN8/agy"
+
+# A fake `opencode` that reports V2 must flip the branch with no env override.
+cat << 'MOCK' > "$MOCK_BIN8/opencode"
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo "opencode v2.0.20"
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN8/opencode"
+
+cat << 'JSON' > "$MOCK_CONFIG8/opencode/opencode.json"
+{ "provider": {} }
+JSON
+
+OUTPUT_DETECT="$(PATH="$MOCK_BIN8:$PATH" env -u AGY_OPENCODE_TARGET HOME="$MOCK_HOME8" XDG_CONFIG_HOME="$MOCK_CONFIG8" "$INSTALL_SCRIPT" 2>&1 || true)"
+assert "opencode --version v2.0.20 selects the V2 branch" 'echo "$OUTPUT_DETECT" | grep -q "OpenCode target: v2"'
+
+# Same fake binary reporting V1 must select the V1 branch.
+cat << 'MOCK' > "$MOCK_BIN8/opencode"
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo "opencode 1.18.29"
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN8/opencode"
+
+OUTPUT_DETECT_V1="$(PATH="$MOCK_BIN8:$PATH" env -u AGY_OPENCODE_TARGET HOME="$MOCK_HOME8" XDG_CONFIG_HOME="$MOCK_CONFIG8" "$INSTALL_SCRIPT" 2>&1 || true)"
+assert "opencode --version 1.18.29 selects the V1 branch" 'echo "$OUTPUT_DETECT_V1" | grep -q "OpenCode target: v1"'
+
+# An unparseable --version falls back to config sniffing (config says V2).
+cat << 'JSON' > "$MOCK_CONFIG8/opencode/opencode.json"
+{ "providers": {} }
+JSON
+cat << 'MOCK' > "$MOCK_BIN8/opencode"
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo "unknown-build"
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN8/opencode"
+
+OUTPUT_SNIFF="$(PATH="$MOCK_BIN8:$PATH" env -u AGY_OPENCODE_TARGET HOME="$MOCK_HOME8" XDG_CONFIG_HOME="$MOCK_CONFIG8" "$INSTALL_SCRIPT" 2>&1 || true)"
+assert "unparseable --version falls back to config shape (providers -> v2)" 'echo "$OUTPUT_SNIFF" | grep -q "OpenCode target: v2"'
+
+rm -rf "$TMP_DIR8"
 
 
 # ------------------------------------------------------------------------------
