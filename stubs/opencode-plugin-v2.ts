@@ -23,6 +23,17 @@ export type ModelInfo = {
   [k: string]: unknown;
 };
 
+// Model transforms hand out editable drafts of the same definition shape
+// (the V2 docs call them `DeepMutable<Model.Info>`), so the shim keeps the
+// index signature and lets a transform assign `variants`.
+export type DeepMutableModelInfo = {
+  id: string;
+  providerID?: string;
+  name: string;
+  variants?: ModelVariantInfo[];
+  [k: string]: unknown;
+};
+
 export type ProviderInfo = {
   id: string;
   name?: string;
@@ -59,6 +70,27 @@ export type ProviderDomain = {
   reload(): Promise<void>;
 };
 
+export type ModelEditor = {
+  list(providerID?: string): readonly DeepMutableModelInfo[];
+  get(
+    providerID: string,
+    modelID: string,
+  ): DeepMutableModelInfo | undefined;
+  update(
+    providerID: string,
+    modelID: string,
+    update: (model: DeepMutableModelInfo) => void,
+  ): void;
+  remove(providerID: string, modelID: string): void;
+};
+
+export type ModelDomain = {
+  transform(
+    callback: (editor: ModelEditor) => void,
+  ): Promise<ProviderRegistration>;
+  reload(): Promise<void>;
+};
+
 export type IntegrationMethodEditor = {
   list(integrationID: string): readonly IntegrationMethod[];
   update(input: { integrationID: string; method: IntegrationMethod }): void;
@@ -83,6 +115,7 @@ export type IntegrationDomain = {
 export type PluginContext = {
   integration: IntegrationDomain;
   provider: ProviderDomain;
+  model: ModelDomain;
   options: Record<string, unknown>;
   [k: string]: unknown;
 };

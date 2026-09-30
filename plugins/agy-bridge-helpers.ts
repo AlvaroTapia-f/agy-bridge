@@ -6,6 +6,9 @@
 // v4: explicit variant masking — undeclared generic efforts are emitted as
 // {disabled:true} so the runtime merge cannot inject unmasked entries;
 // downstream filters disabled before caching/rendering.
+// v4 unchanged by opencode-v2-dual T2: the V2 port is additive and declares the
+// SAME slugs/efforts, so no downstream cache needs invalidating. The V2 map
+// (buildModelV2) masks by omission + a model transform, not by {disabled:true}.
 export const MODEL_MAP_VERSION = 4;
 export const FALLBACK_MODELS = [
   "gemini-3.7-flash-high",
@@ -248,38 +251,187 @@ export type VariantSpec = { reasoningEffort: string } | { disabled: true }
 // "thinking" is agy-specific and never injected, so it stays out of the set.
 export const GENERIC_EFFORTS = ["high", "medium", "low"] as const
 
-export function buildModelMap(bases: Map<string, Set<string>>): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
+// --- Shared catalog core (V1 + V2) -----------------------------------------
+// Both catalog shapes iterate the same (base, profile) expansion over the
+// same grouped declared map, and both map a declared effort to the same
+// `reasoningEffort`. Only the emitted shape differs, so that logic lives here
+// once: V1 `buildModelMap` keeps its shape below, V2 `buildModelV2` emits
+// `Model.Info[]`.
+
+export const MODEL_PROFILES = ["ro", "rw"] as const
+
+export type ModelProfile = (typeof MODEL_PROFILES)[number]
+
+/** Catalog id for one grouped base under one profile. */
+export function modelID(base: string, profile: ModelProfile): string {
+  return `auto-${profile}-${base}`
+}
+
+/**
+ * Declared effort -> opencode `reasoningEffort`. "thinking" is agy-specific
+ * and is NOT a member of opencode's reasoningEffort enum (spike obs #101), so
+ * it is advertised as "max"; `resolveWireModel` maps "max" back to "-thinking"
+ * when, and only when, that base declares "thinking".
+ */
+export function reasoningEffortFor(effort: string): string {
+  return effort === "thinking" ? "max" : effort
+}
+
+/**
+ * Walks the shared catalog core: one entry per (base, profile) pair with its
+ * declared efforts in *declared* (slug) order. Order is preserved because the
+ * V1 map serializes `variants` in that order — sorting it here would change
+ * the V1 output bytes.
+ */
+export function eachModelProfile(
+  bases: Map<string, Set<string>>,
+  emit: (entry: {
+    id: string;
+    base: string;
+    profile: ModelProfile;
+    efforts: readonly string[];
+  }) => void,
+): void {
   for (const [base, variants] of bases) {
-    for (const profile of ["ro", "rw"] as const) {
-      const id = `auto-${profile}-${base}`
-      const variantMap: Record<string, VariantSpec> = {}
-      for (const v of variants) {
-        variantMap[v] = { reasoningEffort: v === "thinking" ? "max" : v };
-      }
-      if (variants.size > 0) {
-        for (const g of GENERIC_EFFORTS) {
-          if (!(g in variantMap)) {
-            variantMap[g] = { disabled: true };
-          }
-        }
-      }
-      out[id] = {
-        id,
-        name: id,
-        provider: { id: "agy-bridge", name: "AGY Bridge" },
-        ...(variants.size
-          ? {
-              reasoning: true as const,
-              interleaved: { field: "reasoning_content" as const },
-              reasoning_options: [...variants].sort(),
-            }
-          : {}),
-        variants: variantMap,
-      }
+    for (const profile of MODEL_PROFILES) {
+      emit({ id: modelID(base, profile), base, profile, efforts: [...variants] });
     }
   }
+}
+
+export function buildModelMap(bases: Map<string, Set<string>>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  eachModelProfile(bases, ({ id, efforts }) => {
+    const variantMap: Record<string, VariantSpec> = {}
+    for (const v of efforts) {
+      variantMap[v] = { reasoningEffort: reasoningEffortFor(v) }
+    }
+    if (efforts.length > 0) {
+      for (const g of GENERIC_EFFORTS) {
+        if (!(g in variantMap)) {
+          variantMap[g] = { disabled: true }
+        }
+      }
+    }
+    out[id] = {
+      id,
+      name: id,
+      provider: { id: "agy-bridge", name: "AGY Bridge" },
+      ...(efforts.length > 0
+        ? {
+          reasoning: true as const,
+          interleaved: { field: "reasoning_content" as const },
+          reasoning_options: [...efforts].sort(),
+        }
+        : {}),
+      variants: variantMap,
+    }
+  })
   return out
+}
+
+// --- OpenCode V2 catalog: Model.Info[] --------------------------------------
+// Shape per https://opencode.ai/v2/docs/models and migrate-v1 "Models and
+// variants":
+// - `variants` is an ARRAY of `{id, settings}` (V1 object form is ignored by
+//   V2 and warns).
+// - V1 `tool_call`/`modalities` become `capabilities.{tools,input,output}`.
+//   V2 `Model.Info` has no `reasoning` flag (migrate-v1 lists `reasoning` as
+//   accepted-but-unsupported): a reasoning model is one that HAS variants.
+// - V1 `interleaved: {field}` becomes `compatibility.reasoningField`.
+// - V1 `reasoning_options` has no V2 equivalent: the variants array *is* the
+//   declared truth (undeclared efforts are omitted, not masked).
+// - `capabilities`/`limit` values are the fallbacks the V2 docs state for a
+//   model absent from the catalog (tools, text+image in, text out, 200k
+//   context, 32k output). The bridge does not advertise its own, and V2
+//   requires both fields, so we pin the documented defaults instead of
+//   letting them float.
+// - `api`/`cost`/`time`/`status`/`request` are provider/runtime owned; they are
+//   omitted so the runtime defaults apply rather than inventing agy pricing.
+
+export const V2_PROVIDER_ID = "agy-bridge"
+export const V2_REASONING_FIELD = "reasoning_content"
+
+export type ModelVariantV2 = {
+  id: string
+  settings: { reasoningEffort: string }
+}
+
+export type ModelV2 = {
+  id: string
+  providerID: string
+  name: string
+  enabled: boolean
+  capabilities: { tools: boolean; input: string[]; output: string[] }
+  limit: { context: number; output: number }
+  compatibility: { reasoningField: string }
+  variants: ModelVariantV2[]
+}
+
+const V2_CAPABILITIES: ModelV2["capabilities"] = {
+  tools: true,
+  input: ["text", "image"],
+  output: ["text"],
+}
+
+const V2_LIMIT: ModelV2["limit"] = { context: 200_000, output: 32_000 }
+
+/**
+ * V2 model inventory: one `Model.Info` per (base, profile) with declared
+ * efforts as a V2 variants array. Deterministic: sorted by id, and each
+ * variants array sorted by variant id.
+ */
+export function buildModelV2(bases: Map<string, Set<string>>): ModelV2[] {
+  const models: ModelV2[] = []
+  eachModelProfile(bases, ({ id, efforts }) => {
+    models.push({
+      id,
+      providerID: V2_PROVIDER_ID,
+      name: id,
+      enabled: true,
+      capabilities: { ...V2_CAPABILITIES, input: [...V2_CAPABILITIES.input], output: [...V2_CAPABILITIES.output] },
+      limit: { ...V2_LIMIT },
+      compatibility: { reasoningField: V2_REASONING_FIELD },
+      variants: [...efforts].sort().map((effort) => ({
+        id: effort,
+        settings: { reasoningEffort: reasoningEffortFor(effort) },
+      })),
+    })
+  })
+  models.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return models
+}
+
+/**
+ * Declared efforts per V2 model id, for the V2 masking transform.
+ * Singletons map to an empty set: no declared effort, nothing selectable.
+ */
+export function declaredVariantsByModel(
+  bases: Map<string, Set<string>>,
+): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>()
+  eachModelProfile(bases, ({ id, efforts }) => out.set(id, new Set(efforts)))
+  return out
+}
+
+/**
+ * V2 effort masking. V1 emitted undeclared generic efforts as
+ * `{disabled:true}` because it had to pre-populate them to win the runtime
+ * merge. V2 has no documented variant-level disable flag and no
+ * `reasoning_options` to intersect with, so masking is expressed as:
+ * (1) omission — `buildModelV2` only emits declared efforts — plus
+ * (2) this filter, applied from a `ctx.model.transform` so any variant the
+ * runtime or another source unions in afterwards is dropped again.
+ * `declared === undefined` means "id not in our declared map": pass through,
+ * never silently empty someone else's model.
+ */
+export function filterUndeclaredVariants<T extends { id: string }>(
+  variants: readonly T[] | undefined,
+  declared: ReadonlySet<string> | undefined,
+): T[] {
+  if (!Array.isArray(variants)) return []
+  if (!declared) return [...variants]
+  return variants.filter((variant) => declared.has(variant.id))
 }
 
 export type DeltaKind = "agent_response" | "thought" | "tool" | "unknown"
