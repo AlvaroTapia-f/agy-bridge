@@ -170,15 +170,52 @@ fi
 
 # 5. Configure opencode provider (global only)
 OPENCODE_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json"
-PLUGIN_SRC="$SCRIPT_DIR/plugins/agy-bridge.ts"
-PLUGIN_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge.ts"
+
+# 5a. Detect the OpenCode major version once and reuse it everywhere below.
+# `deno` is a hard prerequisite (checked in step 1), so delegating to
+# scripts/opencode-version.ts keeps the detection logic in ONE place instead of
+# duplicating the `opencode --version` parse across bash and TypeScript.
+if [[ -f "$SCRIPT_DIR/scripts/opencode-version.ts" ]]; then
+  # Bare mode prints exactly one line: "v1" or "v2".
+  DETECTED="$("$DENO_BIN" run \
+    --allow-run \
+    --allow-read \
+    --allow-env \
+    "$SCRIPT_DIR/scripts/opencode-version.ts" \
+    --config-path "$OPENCODE_CONFIG" 2>/dev/null || true)"
+  OPENCODE_TARGET="$(printf '%s' "$DETECTED" | tr -d '[:space:]')"
+else
+  OPENCODE_TARGET=""
+fi
+if [[ "$OPENCODE_TARGET" != "v1" && "$OPENCODE_TARGET" != "v2" ]]; then
+  # Detection script missing, `opencode` absent, or an unparseable version: the
+  # V1 shape is still accepted by V2 (V2 normalizes V1 fields in memory without
+  # rewriting the file), so V1 is the safe default rather than a guess.
+  OPENCODE_TARGET="v1"
+fi
+echo "  [✓] OpenCode target: $OPENCODE_TARGET (config shape)"
+
+# 5b. Install the bundle that matches the detected major version.
+if [[ "$OPENCODE_TARGET" == "v2" ]]; then
+  PLUGIN_SRC="$SCRIPT_DIR/plugins/agy-bridge.v2.bundle.ts"
+  PLUGIN_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge.v2.bundle.ts"
+else
+  PLUGIN_SRC="$SCRIPT_DIR/plugins/agy-bridge.ts"
+  PLUGIN_DEST="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge.ts"
+fi
 if [[ -f "$PLUGIN_SRC" ]]; then
   mkdir -p "$(dirname "$PLUGIN_DEST")"
   if [[ ! -f "$PLUGIN_DEST" ]] || ! cmp -s "$PLUGIN_SRC" "$PLUGIN_DEST"; then
     cp "$PLUGIN_SRC" "$PLUGIN_DEST"
-    echo "  [✓] Installed opencode plugin at $PLUGIN_DEST"
+    echo "  [✓] Installed opencode $OPENCODE_TARGET plugin at $PLUGIN_DEST"
   else
-    echo "  [i] opencode plugin already up to date at $PLUGIN_DEST"
+    echo "  [i] opencode $OPENCODE_TARGET plugin already up to date at $PLUGIN_DEST"
+  fi
+  if [[ "$OPENCODE_TARGET" == "v1" && -f "$PLUGIN_DEST" ]]; then
+    # V1 loads ~/.config/opencode/plugins/ explicitly, so the V1 bundle also has
+    # to be referenced from opencode.json. V2 auto-discovers that directory
+    # (https://opencode.ai/v2/docs/plugins -> "Discover"), so no entry is needed.
+    echo "  [i] V1 requires an explicit plugin[] entry in opencode.json"
   fi
 else
   echo "  [i] Plugin source not found at $PLUGIN_SRC (skipping plugin install)"
@@ -186,9 +223,12 @@ fi
 
 if [[ -f "$OPENCODE_CONFIG" ]]; then
   if command -v python3 >/dev/null 2>&1; then
+    OPENCODE_TARGET="$OPENCODE_TARGET" OPENCODE_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode" \
     python3 - "$OPENCODE_CONFIG" << 'PYEOF'
-import json, pathlib, sys, os
+import json, sys, os
 config_path = sys.argv[1]
+target = os.environ["OPENCODE_TARGET"]
+config_dir = os.environ["OPENCODE_CONFIG_DIR"]
 try:
     with open(config_path, 'r') as f:
         data = json.load(f)
@@ -196,48 +236,98 @@ except Exception as e:
     print(f"  [!] Could not parse {config_path}: {e}", file=sys.stderr)
     sys.exit(0)
 changed = False
-if "provider" not in data or not isinstance(data["provider"], dict):
-    data["provider"] = {}
-    changed = True
-if "agy-bridge" not in data["provider"] or not isinstance(data["provider"]["agy-bridge"], dict):
-    data["provider"]["agy-bridge"] = {
-        "npm": "@ai-sdk/openai-compatible",
-        "name": "AGY Bridge",
-        "options": {"baseURL": "http://127.0.0.1:7421/v1"}
-    }
-    changed = True
-    print("  [✓] Added provider.agy-bridge to opencode.json")
-else:
-    opts = data["provider"]["agy-bridge"].get("options", {})
-    if not isinstance(opts, dict):
-        opts = {}
-        data["provider"]["agy-bridge"]["options"] = opts
-        changed = True
-    if opts.get("baseURL") != "http://127.0.0.1:7421/v1":
-        data["provider"]["agy-bridge"]["options"]["baseURL"] = "http://127.0.0.1:7421/v1"
-        changed = True
-        print("  [✓] Updated provider.agy-bridge baseURL to http://127.0.0.1:7421/v1")
-    if data["provider"]["agy-bridge"].get("npm") != "@ai-sdk/openai-compatible":
-        data["provider"]["agy-bridge"]["npm"] = "@ai-sdk/openai-compatible"
-        changed = True
 
-plugin_path = f"{os.path.expanduser('~')}/.config/opencode/plugins/agy-bridge.ts"
-if "plugin" not in data or not isinstance(data["plugin"], list):
-    data["plugin"] = []
-    changed = True
-# Keep both file:// and plain variants compatible, prefer plain
-plain = plugin_path
-file_uri = f"file://{plugin_path}"
-# normalize: keep plain, remove file:// duplicates
-if plain not in data["plugin"] and file_uri not in data["plugin"]:
-    data["plugin"].append(plain)
-    changed = True
-    print(f"  [✓] Added plugin ref {plain}")
+BASE_URL = "http://127.0.0.1:7421/v1"
+
+if target == "v2":
+    # Native V2 shape: providers / package / settings.baseURL.
+    # The static models map is intentionally NOT written here — the V2 plugin
+    # registers provider AND catalog via ctx.provider.transform and refreshes it
+    # on ctx.provider.reload(); a config-level copy would be a second, frozen
+    # source of truth (https://opencode.ai/v2/docs/build/plugins).
+    if "providers" not in data or not isinstance(data["providers"], dict):
+        data["providers"] = {}
+        changed = True
+    entry = data["providers"].get("agy-bridge")
+    if not isinstance(entry, dict):
+        data["providers"]["agy-bridge"] = {
+            "name": "AGY Bridge",
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {"baseURL": BASE_URL},
+        }
+        changed = True
+        print("  [✓] Added providers.agy-bridge to opencode.json")
+    else:
+        settings = entry.get("settings")
+        if not isinstance(settings, dict):
+            settings = {}
+            entry["settings"] = settings
+            changed = True
+        if settings.get("baseURL") != BASE_URL:
+            settings["baseURL"] = BASE_URL
+            changed = True
+            print(f"  [✓] Updated providers.agy-bridge baseURL to {BASE_URL}")
+        if entry.get("package") != "@opencode/ai/providers/openai-compatible":
+            entry["package"] = "@opencode/ai/providers/openai-compatible"
+            changed = True
+
+    # Drop our own stale V1 leftovers. Other providers/plugins are untouched.
+    if isinstance(data.get("provider"), dict) and "agy-bridge" in data["provider"]:
+        del data["provider"]["agy-bridge"]
+        changed = True
+        print("  [✓] Removed legacy provider.agy-bridge (superseded by providers.agy-bridge)")
+    legacy_plugin = os.path.join(config_dir, "plugins", "agy-bridge.ts")
+    if isinstance(data.get("plugin"), list):
+        kept = [e for e in data["plugin"] if e != legacy_plugin]
+        if len(kept) != len(data["plugin"]):
+            data["plugin"] = kept if kept else None
+            if not kept:
+                del data["plugin"]
+            changed = True
+            print("  [✓] Removed legacy plugin[] entry (V1 plugin does not run in V2)")
 else:
-    # ensure plain is present, remove file_uri if needed
-    if file_uri in data["plugin"] and plain not in data["plugin"]:
+    if "provider" not in data or not isinstance(data["provider"], dict):
+        data["provider"] = {}
+        changed = True
+    if "agy-bridge" not in data["provider"] or not isinstance(data["provider"]["agy-bridge"], dict):
+        data["provider"]["agy-bridge"] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "AGY Bridge",
+            "options": {"baseURL": BASE_URL}
+        }
+        changed = True
+        print("  [✓] Added provider.agy-bridge to opencode.json")
+    else:
+        opts = data["provider"]["agy-bridge"].get("options", {})
+        if not isinstance(opts, dict):
+            opts = {}
+            data["provider"]["agy-bridge"]["options"] = opts
+            changed = True
+        if opts.get("baseURL") != BASE_URL:
+            data["provider"]["agy-bridge"]["options"]["baseURL"] = BASE_URL
+            changed = True
+            print(f"  [✓] Updated provider.agy-bridge baseURL to {BASE_URL}")
+        if data["provider"]["agy-bridge"].get("npm") != "@ai-sdk/openai-compatible":
+            data["provider"]["agy-bridge"]["npm"] = "@ai-sdk/openai-compatible"
+            changed = True
+
+    plugin_path = os.path.join(config_dir, "plugins", "agy-bridge.ts")
+    if "plugin" not in data or not isinstance(data["plugin"], list):
+        data["plugin"] = []
+        changed = True
+    # Keep both file:// and plain variants compatible, prefer plain
+    plain = plugin_path
+    file_uri = f"file://{plugin_path}"
+    # normalize: keep plain, remove file:// duplicates
+    if plain not in data["plugin"] and file_uri not in data["plugin"]:
         data["plugin"].append(plain)
         changed = True
+        print(f"  [✓] Added plugin ref {plain}")
+    else:
+        # ensure plain is present, remove file_uri if needed
+        if file_uri in data["plugin"] and plain not in data["plugin"]:
+            data["plugin"].append(plain)
+            changed = True
 
 if changed:
     with open(config_path, 'w') as f:
@@ -245,7 +335,7 @@ if changed:
         f.write("\n")
     print(f"  [✓] Updated {config_path}")
 else:
-    print(f"  [i] provider.agy-bridge already configured in {config_path}")
+    print(f"  [i] {('providers' if target == 'v2' else 'provider')}.agy-bridge already configured in {config_path}")
 PYEOF
   else
     echo "  [i] python3 not found — skipping opencode provider base setup"
@@ -255,8 +345,16 @@ PYEOF
   # explicitly masked). The gentle-ai model-variants.json unions generic
   # {high,low,medium} into every agy-bridge row; drop only our key so it
   # resyncs from the masked provider map on the next opencode run.
+  #
+  # V1 ONLY. In V2 this cache and its cache-writer are dead paths: the gentle-ai
+  # model-variants plugin is V2-native (Plugin.define + ctx.model.list(), writing
+  # variants as an id array into ~/.gentle-ai/cache/opencode-v2/), it has no
+  # {disabled:true} masking to undo, and the mask marker layout no longer exists.
+  # Patching it would be a guaranteed layout-mismatch no-op at best.
   MODEL_VARIANTS_CACHE="$HOME/.gentle-ai/cache/model-variants.json"
-  if [[ -f "$MODEL_VARIANTS_CACHE" ]]; then
+  if [[ "$OPENCODE_TARGET" != "v1" ]]; then
+    echo "  [i] Skipping model-variants.json purge: V1-only path (V2 cache lives in ~/.gentle-ai/cache/opencode-v2/)"
+  elif [[ -f "$MODEL_VARIANTS_CACHE" ]]; then
     if command -v python3 >/dev/null 2>&1; then
       MODEL_VARIANTS_CACHE="$MODEL_VARIANTS_CACHE" python3 << 'PYEOF'
 import json, os, pathlib
@@ -282,7 +380,9 @@ PYEOF
   # model-variants.ts.bak before writing, non-fatal on layout mismatch — the
   # v4 purge above still applies and the sync below still runs.
   MODEL_VARIANTS_PLUGIN="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/model-variants.ts"
-  if [[ -f "$MODEL_VARIANTS_PLUGIN" ]]; then
+  if [[ "$OPENCODE_TARGET" != "v1" ]]; then
+    echo "  [i] Skipping model-variants.ts patch: V1-only masking layout (marker agy-bridge-mask-v1)"
+  elif [[ -f "$MODEL_VARIANTS_PLUGIN" ]]; then
     if grep -q "agy-bridge-mask-v1" "$MODEL_VARIANTS_PLUGIN" 2>/dev/null; then
       echo "  [i] model-variants.ts already patched for v4 masking"
     elif command -v python3 >/dev/null 2>&1; then
@@ -328,7 +428,12 @@ PYEOF
 
   # Synchronize models: Deno scripts/sync-models.ts (hard requirement, fails on error)
   if [[ -f "$SCRIPT_DIR/scripts/sync-models.ts" ]]; then
-    echo "  [+] Synchronizing models via Deno..."
+    echo "  [+] Synchronizing models via Deno ($OPENCODE_TARGET shape)..."
+    SYNC_EXTRA_ARGS=()
+    if [[ "$OPENCODE_TARGET" == "v2" ]]; then
+      # Let the sync drop the stale V1 plugin[] entry while converting.
+      SYNC_EXTRA_ARGS+=(--v1-plugin-path "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/agy-bridge.ts")
+    fi
     if ! "$DENO_BIN" run \
       --allow-run="${AGY_BIN:-agy},agy" \
       --allow-net=127.0.0.1:7421 \
@@ -337,6 +442,8 @@ PYEOF
       --allow-env \
       "$SCRIPT_DIR/scripts/sync-models.ts" \
       --config-path "$OPENCODE_CONFIG" \
+      --target "$OPENCODE_TARGET" \
+      ${SYNC_EXTRA_ARGS[@]+"${SYNC_EXTRA_ARGS[@]}"} \
       ${AGY_BIN:+--agy-bin "$AGY_BIN"}; then
       echo "Error: Deno model sync failed." >&2
       exit 1
@@ -472,8 +579,17 @@ fi
 # for agy-bridge, even though we set it true. The gentle-ai TUI gates on that flag.
 # This idempotent patch makes listReasoningEffortsFromModel accept variants.*.reasoningEffort
 # even when capabilities.reasoning is false, so /sdd-model effort works on fresh installs.
+#
+# V1 ONLY. Both halves of the workaround are V1-specific and have no V2
+# equivalent to patch: the bundled dist/tui.js path is gone (V2 ships a CLI
+# plugin API instead, https://opencode.ai/v2/docs/build/plugins/cli, which reads
+# variants from the model catalog via context.ui.model.variant.list() with no
+# capabilities.reasoning gate), and V2's own model contract declares reasoning
+# through capabilities/compatibility rather than the V1 flat `reasoning` flag.
 TUI_JS="$HOME/.cache/opencode/packages/opencode-sdd-engram-manage@latest/node_modules/opencode-sdd-engram-manage/dist/tui.js"
-if [[ -f "$TUI_JS" ]]; then
+if [[ "$OPENCODE_TARGET" != "v1" ]]; then
+  echo "  [i] Skipping gentle-ai TUI effort patch: V1-only bundled-TUI workaround"
+elif [[ -f "$TUI_JS" ]]; then
   if grep -q "hasReasoningEffort" "$TUI_JS" 2>/dev/null; then
     echo "  [i] gentle-ai TUI already patched for agy-bridge effort"
   else

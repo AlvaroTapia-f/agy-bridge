@@ -108,49 +108,67 @@ var GENERIC_EFFORTS = [
   "medium",
   "low"
 ];
-function buildModelMap(bases) {
-  const out = {};
+var MODEL_PROFILES = [
+  "ro",
+  "rw"
+];
+function modelID(base, profile) {
+  return `auto-${profile}-${base}`;
+}
+function reasoningEffortFor(effort) {
+  return effort === "thinking" ? "max" : effort;
+}
+function eachModelProfile(bases, emit) {
   for (const [base, variants] of bases) {
-    for (const profile of [
-      "ro",
-      "rw"
-    ]) {
-      const id = `auto-${profile}-${base}`;
-      const variantMap = {};
-      for (const v of variants) {
-        variantMap[v] = {
-          reasoningEffort: v === "thinking" ? "max" : v
-        };
-      }
-      if (variants.size > 0) {
-        for (const g of GENERIC_EFFORTS) {
-          if (!(g in variantMap)) {
-            variantMap[g] = {
-              disabled: true
-            };
-          }
-        }
-      }
-      out[id] = {
-        id,
-        name: id,
-        provider: {
-          id: "agy-bridge",
-          name: "AGY Bridge"
-        },
-        ...variants.size ? {
-          reasoning: true,
-          interleaved: {
-            field: "reasoning_content"
-          },
-          reasoning_options: [
-            ...variants
-          ].sort()
-        } : {},
-        variants: variantMap
-      };
+    for (const profile of MODEL_PROFILES) {
+      emit({
+        id: modelID(base, profile),
+        base,
+        profile,
+        efforts: [
+          ...variants
+        ]
+      });
     }
   }
+}
+function buildModelMap(bases) {
+  const out = {};
+  eachModelProfile(bases, ({ id, efforts }) => {
+    const variantMap = {};
+    for (const v of efforts) {
+      variantMap[v] = {
+        reasoningEffort: reasoningEffortFor(v)
+      };
+    }
+    if (efforts.length > 0) {
+      for (const g of GENERIC_EFFORTS) {
+        if (!(g in variantMap)) {
+          variantMap[g] = {
+            disabled: true
+          };
+        }
+      }
+    }
+    out[id] = {
+      id,
+      name: id,
+      provider: {
+        id: "agy-bridge",
+        name: "AGY Bridge"
+      },
+      ...efforts.length > 0 ? {
+        reasoning: true,
+        interleaved: {
+          field: "reasoning_content"
+        },
+        reasoning_options: [
+          ...efforts
+        ].sort()
+      } : {},
+      variants: variantMap
+    };
+  });
   return out;
 }
 

@@ -72,10 +72,18 @@ curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/insta
 curl -fsSL https://raw.githubusercontent.com/AlvaroTapia-f/agy-bridge/main/install-remote.sh | bash -s -- --with-auth
 ```
 
-El instalador registra provider, plugin y modelos (14 ids `auto-ro/rw-*` con
-variantes `reasoningEffort` vía `scripts/sync-models.ts`). Sin el plugin solo
-hay resolución live; **sin el mapa de modelos en `opencode.json` no hay
-efforts** ([cómo funciona](docs/installer-internals.md#sincronización-de-modelos)).
+El instalador detecta la versión de opencode y escribe la forma que le
+corresponde:
+
+- **OpenCode V1**: registra provider, plugin y modelos (14 ids `auto-ro/rw-*`
+  con variantes `reasoningEffort` vía `scripts/sync-models.ts`). Sin el plugin
+  solo hay resolución live; **sin el mapa de modelos en `opencode.json` no hay
+  efforts** ([cómo funciona](docs/installer-internals.md#sincronización-de-modelos)).
+- **OpenCode V2**: registra `providers.agy-bridge` (con `package` +
+  `settings.baseURL`) y el plugin V2 **sin** bloque `models` — el catálogo lo
+  publica el plugin y se refresca solo ([por qué](docs/model-contract.md#dual-v1-mapa-estático-vs-v2-catálogo-del-plugin)).
+
+Se puede forzar con `AGY_OPENCODE_TARGET=v1|v2`.
 
 **3. Verificá que anda** (el instalador ya registró provider, plugin y modelos):
 
@@ -169,11 +177,46 @@ plugin ([forma exacta](docs/installer-internals.md#provider-opencode-global)):
 
 El plugin solo resuelve live; sin `models` en JSON no hay efforts.
 
+> **Esto es el cableado de OpenCode V1.** En V2 el bloque `models` no existe:
+> el catálogo (incluidos los `variants`/`reasoningEffort`) lo publica el plugin
+> y se refresca solo. Si tenés **opencode v2.x**, usá el bloque de V2 de abajo
+> en lugar de este — escribir la forma V1 en V2 no da error, se ignora en
+> silencio y te quedás sin efforts.
+
 Los modelos `auto-ro/rw-*` con `variants` (`reasoningEffort`) se generan con
 `deno task sync:models` en Linux; en Windows, si el catálogo cambia, regenerá
 el mapa desde una máquina con `deno` + `agy` y copiá el bloque `models`
 resultante, o pedí el mapa actualizado al mantenedor. Nunca expongas ids bare
 `gemini-*`/`claude-*`.
+
+#### Si tenés OpenCode V2
+
+a) Copiá el bundle V2 al directorio de plugins del config. No lo referencies
+desde `opencode.json`: V2 autodetecta los `.ts`/`.js` de ese directorio, y las
+entradas de `plugin` del config apuntan a **directorios**, no a archivos.
+
+```powershell
+Copy-Item .\plugins\agy-bridge.v2.bundle.ts $HOME\.config\opencode\plugins\agy-bridge.v2.bundle.ts -Force
+```
+
+b) En `%USERPROFILE%\.config\opencode\opencode.json`, reemplazá cualquier
+bloque `provider.agy-bridge` por este (notá el plural `providers`, `package` en
+vez de `npm`, `settings` en vez de `options`, y **sin** `models`):
+
+```json
+{
+  "providers": {
+    "agy-bridge": {
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": { "baseURL": "http://127.0.0.1:7421/v1" }
+    }
+  }
+}
+```
+
+c) El auth en V2 no es `/connect` → `Other`: es el equivalente del paso (c) de
+abajo, hecho desde el TUI (`/connect` → `agy-bridge` → la key), o
+`POST /api/integration/agy-bridge/connect/key` con `{"key": "<AGY_TOKEN>"}`.
 
 c) En `%USERPROFILE%\.local\share\opencode\auth.json`, agregá la clave
 (preservando las demás):
@@ -266,28 +309,48 @@ Docker (start/stop/rebuild/reset):
 
 Linux:
 
-1. En `~/.config/opencode/opencode.json`, borrá `provider.agy-bridge` y la
-   entrada del plugin.
-2. En `~/.local/share/opencode/auth.json`, eliminá la clave `agy-bridge`
+1. En `~/.config/opencode/opencode.json`, borrá `provider.agy-bridge`
+   (V1) **y** `providers.agy-bridge` (V2). Borrar las dos es inocuo: la que
+   sobre la ignora el otro runtime en silencio. Si instalaste en V2, borrá
+   además el archivo del plugin:
+   `rm ~/.config/opencode/plugins/agy-bridge.v2.bundle.ts` (en V2 el plugin se
+   autodestruye borrando el archivo; no hay entrada `plugin` que quitar).
+3. En `~/.local/share/opencode/auth.json`, eliminá la clave `agy-bridge`
    (preservando las demás) y dejá el archivo en `chmod 600`.
-3. Reiniciá opencode y verificá que ya no aparece el provider.
-4. Opcional: detené y deshabilitá el servicio `agy-bridge` de systemd.
+4. Reiniciá opencode y verificá que ya no aparece el provider.
+5. Opcional: detené y deshabilitá el servicio `agy-bridge` de systemd.
 
 Comandos exactos: [`docs/installer-internals.md`](docs/installer-internals.md#rollback).
 
 Windows/Docker:
 
-1. Quitá `provider.agy-bridge`, la entrada del plugin y la clave `agy-bridge`
-   de `opencode.json`/`auth.json` como arriba y reiniciá opencode.
+1. Quitá `provider.agy-bridge` / `providers.agy-bridge`, el archivo del plugin
+   (V2) y la clave `agy-bridge` de `opencode.json`/`auth.json` como arriba y
+   reiniciá opencode.
 2. Detené sin borrar OAuth: `docker compose down` (conserva volúmenes).
 3. Solo si querés borrar todo (OAuth + secretos + estado):
    `docker compose down -v`, sabiendo que luego hay que re-autenticar.
 
 ## Problemas comunes
 
+> **Estado del soporte V2 (leé esto antes de instalar en V2).** La forma V2 de
+> la config, el plugin y el contrato del modelo están escritos y **verificados
+> contra `opencode v2.0.20`**: `bash tests/plugin-smoke-v2.sh` levanta un
+> opencode privado y comprueba que el plugin queda activo, que los 14 modelos se
+> sirven y que cada variante llega con su `reasoningEffort` intacto. Estado
+> actual: **19/19 checks verdes**.
+>
+> El bundle V2 falló en silencio hasta que ese smoke existió: el método de auth
+> usaba la forma de V1 y a cada `Model.Info` le faltaban `time`/`cost`/`status`.
+> Ninguno daba error visible. Si tocás el contrato del modelo, el smoke es el
+> gate obligatorio — la evidencia está en
+> [model-contract.md](docs/model-contract.md#por-qué-la-doc-sola-no-alcanza-y-por-qué-hay-smoke).
+
 | Síntoma | Solución corta |
 |---|---|
-| `401` en `/v1/models` | Falta el Bearer: `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `<AGY_TOKEN>`; en Linux o re-correr el instalador con `--with-auth`; en Docker re-obtener con `docker compose run --rm print-token` |
+| `401` en `/v1/models` | Falta el Bearer. **V1:** `opencode` → `/connect` → `Other` → `agy-bridge` → pegar `<AGY_TOKEN>`. **V2:** `opencode` → `/connect` → `agy-bridge` → la key (o `POST /api/integration/agy-bridge/connect/key` con `{"key":"<AGY_TOKEN>"}`). En Linux o re-correr el instalador con `--with-auth`; en Docker re-obtener con `docker compose run --rm print-token` |
+| En V2 no aparece ningún modelo `agy-bridge/*` | Corré `opencode` → `/plugins`: si el plugin figura `failed`, el catálogo nunca se registró (V2 lo publica el plugin, no el config). El log del servidor dice por qué. Gate reproducible: `bash tests/plugin-smoke-v2.sh` |
+| El picker no muestra efforts en V2 | El `Model.Info` del plugin tiene que llevar `variants[].settings.reasoningEffort` **y** `time`/`cost`/`status`. Sin `time.released` el endpoint de modelos entero responde 500 y no hay lista. Ver [Contrato del modelo](docs/model-contract.md#forma-del-modelo-en-v2-medido-contra-opencode-v2020) |
 | `403` con `Host` raro | Es el guard anti-DNS-rebind: usá `127.0.0.1` o `localhost` como host |
 | `404` en `/chat/completions` | El `baseURL` del provider **debe** terminar en `/v1` (el SDK añade `/chat/completions`) |
 | `/sdd-model` dice que el modelo no expone effort | El cache del TUI quedó viejo: re-corré `./install.sh` para reaplicar el parche ([por qué](docs/installer-internals.md#parche-del-tui-gentle-ai-effort)) |
